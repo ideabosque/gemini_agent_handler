@@ -472,6 +472,7 @@ class GeminiEventHandler(AIAgentEventHandler):
         if self.assistant_messages:
             index = self.assistant_messages[-1]["index"]
             message_id = self.assistant_messages[-1]["message_id"]
+            accumulated_partial_text = " "
 
         for chunk in response_stream:
 
