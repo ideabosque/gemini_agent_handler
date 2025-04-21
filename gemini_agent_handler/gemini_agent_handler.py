@@ -472,6 +472,12 @@ class GeminiEventHandler(AIAgentEventHandler):
         if self.assistant_messages:
             index = self.assistant_messages[-1]["index"]
             message_id = self.assistant_messages[-1]["message_id"]
+            self.send_data_to_websocket(
+                index=index,
+                data_format=output_format,
+                chunk_delta=" ",
+            )
+            index += 1
 
         for chunk in response_stream:
 
@@ -562,7 +568,9 @@ class GeminiEventHandler(AIAgentEventHandler):
 
         while self.assistant_messages:
             assistant_message = self.assistant_messages.pop()
-            self.accumulated_text = assistant_message["content"] + self.accumulated_text
+            self.accumulated_text = (
+                assistant_message["content"] + " " + self.accumulated_text
+            )
 
         self.final_output = {
             "message_id": message_id,
