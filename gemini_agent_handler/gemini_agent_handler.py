@@ -469,6 +469,9 @@ class GeminiEventHandler(AIAgentEventHandler):
             .get("type", "text")
         )
         index = 0
+        if self.assistant_messages:
+            index = self.assistant_messages[-1]["index"] + 1
+            message_id = self.assistant_messages[-1]["message_id"]
 
         for chunk in response_stream:
 
@@ -539,7 +542,13 @@ class GeminiEventHandler(AIAgentEventHandler):
                         parts=[types.Part(text=self.accumulated_text)],
                     )
                 )
-                self.assistant_messages.append(self.accumulated_text)
+                self.assistant_messages.append(
+                    {
+                        "message_id": message_id,
+                        "content": self.accumulated_text,
+                        "index": index,
+                    }
+                )
             self.handle_function_call(
                 tool_call, input_messages, stream_event=stream_event
             )
@@ -552,8 +561,9 @@ class GeminiEventHandler(AIAgentEventHandler):
         )
 
         while self.assistant_messages:
+            assistant_message = self.assistant_messages.pop()
             self.accumulated_text = (
-                self.assistant_messages.pop() + "\n" + self.accumulated_text
+                assistant_message["content"] + "\n" + self.accumulated_text
             )
 
         self.final_output = {
