@@ -482,7 +482,7 @@ class GeminiEventHandler(AIAgentEventHandler):
                 self.handle_function_call(
                     tool_call, input_messages, stream_event=stream_event
                 )
-                break
+                return
 
             if not chunk.text:
                 continue
