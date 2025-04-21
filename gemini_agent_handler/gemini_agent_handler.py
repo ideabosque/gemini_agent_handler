@@ -563,9 +563,7 @@ class GeminiEventHandler(AIAgentEventHandler):
 
         while self.assistant_messages:
             assistant_message = self.assistant_messages.pop()
-            self.accumulated_text = (
-                assistant_message["content"] + "\n" + self.accumulated_text
-            )
+            self.accumulated_text = assistant_message["content"] + self.accumulated_text
 
         self.final_output = {
             "message_id": message_id,
