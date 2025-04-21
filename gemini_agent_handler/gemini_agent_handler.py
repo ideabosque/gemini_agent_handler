@@ -530,12 +530,6 @@ class GeminiEventHandler(AIAgentEventHandler):
             accumulated_partial_text = ""
             index += 1
 
-        self.send_data_to_websocket(
-            index=index,
-            data_format=output_format,
-            is_message_end=True,
-        )
-
         # Handle tool usage if detected
         if tool_call:
             if self.accumulated_text:
@@ -550,6 +544,12 @@ class GeminiEventHandler(AIAgentEventHandler):
                 tool_call, input_messages, stream_event=stream_event
             )
             return
+
+        self.send_data_to_websocket(
+            index=index,
+            data_format=output_format,
+            is_message_end=True,
+        )
 
         while self.assistant_messages:
             self.accumulated_text = (
