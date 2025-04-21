@@ -64,6 +64,7 @@ class GeminiEventHandler(AIAgentEventHandler):
                 ],
             },
         )
+        self.assistant_messages = []
 
     def invoke_model(self, **kwargs: Dict[str, Any]) -> Any:
         """
@@ -458,6 +459,7 @@ class GeminiEventHandler(AIAgentEventHandler):
             stream_event: Event to signal streaming completion
         """
         message_id = None
+        tool_call = None
         self.accumulated_text = ""
         accumulated_partial_json = ""
         accumulated_partial_text = ""
@@ -477,12 +479,6 @@ class GeminiEventHandler(AIAgentEventHandler):
                 if candidate.content.parts
                 else None
             )
-
-            if tool_call:
-                self.handle_function_call(
-                    tool_call, input_messages, stream_event=stream_event
-                )
-                return
 
             if not chunk.text:
                 continue
@@ -539,6 +535,26 @@ class GeminiEventHandler(AIAgentEventHandler):
             data_format=output_format,
             is_message_end=True,
         )
+
+        # Handle tool usage if detected
+        if tool_call:
+            if self.accumulated_text:
+                input_messages.append(
+                    types.Content(
+                        role="model",
+                        parts=[types.Part(text=self.accumulated_text)],
+                    )
+                )
+                self.assistant_messages.append(self.accumulated_text)
+            self.handle_function_call(
+                tool_call, input_messages, stream_event=stream_event
+            )
+            return
+
+        while self.assistant_messages:
+            self.accumulated_text = (
+                self.assistant_messages.pop() + "\n" + self.accumulated_text
+            )
 
         self.final_output = {
             "message_id": message_id,
