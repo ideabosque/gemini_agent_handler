@@ -223,12 +223,6 @@ class GeminiEventHandler(AIAgentEventHandler):
                 tool_call, function_output, input_messages
             )
 
-            # Continue conversation
-            self.logger.info(
-                f"[handle_function_call][{function_call_data['name']}] Continuing conversation"
-            )
-            self._continue_conversation(input_messages, stream_event)
-
             if self._run is None:
                 self._short_term_memory.append(
                     {
@@ -248,6 +242,8 @@ class GeminiEventHandler(AIAgentEventHandler):
                         "created_at": pendulum.now("UTC"),
                     }
                 )
+
+            return input_messages
 
         except Exception as e:
             self.logger.error(f"Error in handle_function_call: {e}")
@@ -434,7 +430,10 @@ class GeminiEventHandler(AIAgentEventHandler):
         )
 
         if tool_call:
-            self.handle_function_call(tool_call, input_messages)
+            input_messages = self.handle_function_call(tool_call, input_messages)
+            response = self.invoke_model(**{"input": input_messages, "stream": False})
+            self.handle_output(response, input_messages)
+
         else:
             timestamp = pendulum.now("UTC").int_timestamp
             message_id = f"msg-gemini-{self.model}-{timestamp}-{str(uuid.uuid4())[:8]}"
@@ -555,8 +554,15 @@ class GeminiEventHandler(AIAgentEventHandler):
                         "index": index,
                     }
                 )
-            self.handle_function_call(
-                tool_call, input_messages, stream_event=stream_event
+            input_messages = self.handle_function_call(tool_call, input_messages)
+            response = self.invoke_model(
+                **{
+                    "input": input_messages,
+                    "stream": bool(stream_event),
+                }
+            )
+            self.handle_stream(
+                response, input_messages=input_messages, stream_event=stream_event
             )
             return
 
