@@ -155,7 +155,7 @@ class GeminiEventHandler(AIAgentEventHandler):
                 )
                 return None
 
-            self.handle_output(response, _input_messages)
+            self.handle_response(response, _input_messages)
             return run_id
         except Exception as e:
             self.logger.error(f"Error in ask_model: {str(e)}")
@@ -406,9 +406,9 @@ class GeminiEventHandler(AIAgentEventHandler):
         if stream_event:
             self.handle_stream(response, input_messages, stream_event)
         else:
-            self.handle_output(response, input_messages)
+            self.handle_response(response, input_messages)
 
-    def handle_output(
+    def handle_response(
         self,
         response: Any,
         input_messages: List[Dict[str, Any]],
@@ -443,7 +443,7 @@ class GeminiEventHandler(AIAgentEventHandler):
                     )
 
             response = self.invoke_model(**{"input": input_messages, "stream": False})
-            self.handle_output(response, input_messages)
+            self.handle_response(response, input_messages)
         else:
             timestamp = pendulum.now("UTC").int_timestamp
             message_id = f"msg-gemini-{self.model}-{timestamp}-{str(uuid.uuid4())[:8]}"
