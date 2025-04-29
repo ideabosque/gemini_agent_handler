@@ -420,20 +420,30 @@ class GeminiEventHandler(AIAgentEventHandler):
             response: Model response object
             input_messages: Conversation history for updates
         """
-        self.logger.info("Processing output: %s", response)
 
         candidate = response.candidates[0]
-        tool_call = (
-            candidate.content.parts[0].function_call
-            if candidate.content.parts
-            else None
-        )
 
-        if tool_call:
-            input_messages = self.handle_function_call(tool_call, input_messages)
+        if any(
+            hasattr(part, "function_call") and part.function_call
+            for part in candidate.content.parts
+        ):
+            for part in candidate.content.parts:
+                if hasattr(part, "function_call") and part.function_call:
+                    tool_call = part.function_call
+
+                    input_messages = self.handle_function_call(
+                        tool_call, input_messages
+                    )
+                else:
+                    input_messages.append(
+                        types.Content(
+                            role="model",
+                            parts=[types.Part(text=part.text)],
+                        )
+                    )
+
             response = self.invoke_model(**{"input": input_messages, "stream": False})
             self.handle_output(response, input_messages)
-
         else:
             timestamp = pendulum.now("UTC").int_timestamp
             message_id = f"msg-gemini-{self.model}-{timestamp}-{str(uuid.uuid4())[:8]}"
