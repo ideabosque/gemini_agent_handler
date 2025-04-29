@@ -25,12 +25,15 @@ from silvaengine_utility import Utility
 # ----------------------------
 class GeminiEventHandler(AIAgentEventHandler):
     """
-    Manages conversations and function calls in real-time with Google's Gemini API:
-      - Streams partial text deltas.
-      - Detects function calls embedded in the response.
-      - Executes local functions as needed.
-      - Maintains the conversation history (input_messages).
-      - Stores the final generated message or function call outputs.
+    A handler class for managing conversations and function calls with Google's Gemini API.
+
+    Key capabilities:
+    - Streams partial text responses in real-time
+    - Detects and executes function calls embedded in responses
+    - Maintains conversation history and context
+    - Handles both streaming and non-streaming responses
+    - Manages function execution state and results
+    - Supports WebSocket streaming for real-time updates
     """
 
     def __init__(
@@ -40,9 +43,12 @@ class GeminiEventHandler(AIAgentEventHandler):
         **setting: Dict[str, Any],
     ) -> None:
         """
-        :param logger: A logging instance for debug/info messages.
-        :param agent: Dictionary containing agent configuration and tools.
-        :param setting: Additional settings for the handler.
+        Initialize the Gemini event handler.
+
+        Args:
+            logger: Logger instance for debug/info messages
+            agent: Configuration dictionary containing API keys, model settings and available tools
+            setting: Additional handler settings and configurations
         """
         AIAgentEventHandler.__init__(self, logger, agent, **setting)
 
@@ -68,13 +74,15 @@ class GeminiEventHandler(AIAgentEventHandler):
 
     def invoke_model(self, **kwargs: Dict[str, Any]) -> Any:
         """
-        Invokes the Gemini model with provided messages and handles tool calls
+        Invokes the Gemini model with the provided configuration.
 
         Args:
-            kwargs: Contains input messages and streaming configuration
+            kwargs: Dictionary containing:
+                - input: Messages to send to the model
+                - stream: Boolean indicating if streaming response is desired
 
         Returns:
-            Model response or streaming response
+            Either a streaming or non-streaming model response
 
         Raises:
             Exception: If model invocation fails
@@ -107,14 +115,20 @@ class GeminiEventHandler(AIAgentEventHandler):
         model_setting: Dict[str, Any] = None,
     ) -> Optional[str]:
         """
-        Sends a request to the Gemini API. If a queue is provided, we switch to streaming mode,
-        otherwise, a simple (non-streaming) request is made.
+        Sends a request to the Gemini API and handles the response.
 
-        :param input_messages: Conversation history, including the latest user question.
-        :param queue: An optional queue to receive streaming events. If provided, streaming is used.
-        :param stream_event: An optional threading.Event to signal streaming completion.
-        :param model_setting: Optional model-specific settings to override defaults.
-        :return: The response ID if non-streaming, otherwise None.
+        Args:
+            input_messages: List of conversation messages including user queries
+            queue: Queue for receiving streaming events (enables streaming mode if provided)
+            stream_event: Event to signal when streaming is complete
+            model_setting: Optional settings to override default model configuration
+
+        Returns:
+            str: Response ID for non-streaming requests
+            None: For streaming requests
+
+        Raises:
+            Exception: If request processing fails
         """
         try:
             if not self.client:
@@ -168,20 +182,25 @@ class GeminiEventHandler(AIAgentEventHandler):
         stream_event: threading.Event = None,
     ) -> None:
         """
-        Handles function calls from the model by:
-        1. Validating and extracting function call details
-        2. Executing the requested function with provided arguments
-        3. Recording function execution status and results
-        4. Updating conversation history
-        5. Continuing the conversation with function results
+        Processes and executes function calls from the model response.
+
+        The function:
+        1. Extracts and validates function call details
+        2. Records the function call in async storage
+        3. Processes and validates function arguments
+        4. Executes the requested function
+        5. Updates conversation history with results
+        6. Handles any errors during execution
 
         Args:
-            tool_call: Function call data from model response
-            input_messages: Conversation history to update
-            stream_event: Optional event to signal streaming completion
+            tool_call: Function call information from model response
+            input_messages: Current conversation history
+            stream_event: Event to signal streaming completion
+
+        Returns:
+            Updated input_messages with function results
 
         Raises:
-            ValueError: If tool_call is invalid or function not supported
             Exception: If function execution fails
         """
         try:
@@ -250,7 +269,15 @@ class GeminiEventHandler(AIAgentEventHandler):
             raise
 
     def _record_function_call_start(self, function_call_data: Dict[str, Any]) -> None:
-        """Records the initial function call details in the async storage"""
+        """
+        Records the initial function call details in async storage.
+
+        Args:
+            function_call_data: Dictionary containing function call metadata including:
+                - id: Unique identifier for the function call
+                - type: Type of tool call
+                - name: Name of the function being called
+        """
         self.invoke_async_funct(
             "async_insert_update_tool_call",
             **{
@@ -264,13 +291,13 @@ class GeminiEventHandler(AIAgentEventHandler):
         self, function_call_data: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        Parses and processes function arguments, adding endpoint_id
+        Processes and validates function arguments.
 
         Args:
-            function_call_data: Dictionary containing function call metadata
+            function_call_data: Dictionary containing function metadata and arguments
 
         Returns:
-            Processed arguments dictionary
+            Dictionary of processed arguments with added endpoint_id
 
         Raises:
             ValueError: If argument parsing fails
@@ -299,17 +326,17 @@ class GeminiEventHandler(AIAgentEventHandler):
         self, function_call_data: Dict[str, Any], arguments: Dict[str, Any]
     ) -> Any:
         """
-        Executes the requested function and handles the result
+        Executes the requested function and handles execution state.
 
         Args:
-            function_call_data: Dictionary containing function call metadata
+            function_call_data: Dictionary containing function metadata
             arguments: Processed arguments to pass to the function
 
         Returns:
-            Function output or error message
+            Function execution result or error message
 
         Raises:
-            ValueError: If function is not supported
+            ValueError: If requested function is not supported
         """
         agent_function = self.get_function(function_call_data["name"])
         if not agent_function:
@@ -359,12 +386,17 @@ class GeminiEventHandler(AIAgentEventHandler):
         input_messages: List[Dict[str, Any]],
     ) -> None:
         """
-        Updates conversation history with function call and output
+        Updates the conversation history with function call results.
 
         Args:
-            tool_call: Function call data from model response
-            function_output: Result from executing the function
+            tool_call: Original function call data from model
+            function_output: Result from function execution
             input_messages: Conversation history to update
+
+        The function:
+        1. Creates a function response part with execution results
+        2. Appends the original function call to history
+        3. Appends the function response to history
         """
         # Create a function response part
         function_response_part = types.Part.from_function_response(
@@ -384,41 +416,23 @@ class GeminiEventHandler(AIAgentEventHandler):
             types.Content(role="user", parts=[function_response_part])
         )  # Append the function response
 
-    def _continue_conversation(
-        self,
-        input_messages: List[Dict[str, Any]],
-        stream_event: threading.Event = None,
-    ) -> None:
-        """
-        Continues conversation with updated inputs after function call
-
-        Args:
-            input_messages: Updated conversation history
-            stream_event: Optional event to signal streaming completion
-        """
-        response = self.invoke_model(
-            **{
-                "input": input_messages,
-                "stream": bool(stream_event),
-            }
-        )
-
-        if stream_event:
-            self.handle_stream(response, input_messages, stream_event)
-        else:
-            self.handle_response(response, input_messages)
-
     def handle_response(
         self,
         response: Any,
         input_messages: List[Dict[str, Any]],
     ) -> None:
         """
-        Processes a single output object from the model response
+        Processes a non-streaming model response.
 
         Args:
-            response: Model response object
-            input_messages: Conversation history for updates
+            response: Complete model response object
+            input_messages: Current conversation history
+
+        The function:
+        1. Checks for function calls in the response
+        2. Handles any function calls found
+        3. Updates conversation with text responses
+        4. Stores final output message
         """
 
         candidate = response.candidates[0]
@@ -460,12 +474,19 @@ class GeminiEventHandler(AIAgentEventHandler):
         stream_event: threading.Event = None,
     ) -> None:
         """
-        Processes streaming response from the model
+        Processes streaming responses from the model.
 
         Args:
-            response_stream: Streaming response from model
-            input_messages: Conversation history for updates
+            response_stream: Iterator of response chunks from model
+            input_messages: Current conversation history
             stream_event: Event to signal streaming completion
+
+        The function:
+        1. Accumulates text chunks from the stream
+        2. Handles different output formats (text, JSON)
+        3. Processes any function calls found in stream
+        4. Sends incremental updates via WebSocket
+        5. Maintains conversation state and history
         """
         message_id = None
         tool_call = None
