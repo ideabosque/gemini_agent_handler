@@ -179,7 +179,6 @@ class GeminiEventHandler(AIAgentEventHandler):
         self,
         tool_call: Any,
         input_messages: List[Dict[str, Any]],
-        stream_event: threading.Event = None,
     ) -> None:
         """
         Processes and executes function calls from the model response.
