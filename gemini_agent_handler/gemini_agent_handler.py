@@ -55,6 +55,19 @@ class GeminiEventHandler(AIAgentEventHandler):
         self.logger = logger
         self.client = genai.Client(api_key=agent["configuration"].get("api_key"))
         self.model = agent["configuration"].get("model")
+
+        if any(
+            tool["name"] == "google_search"
+            for tool in agent["configuration"].get("tools", [])
+        ):
+            tools = [types.Tool(google_search=types.GoogleSearch())]
+        else:
+            tools = [
+                types.Tool(
+                    function_declarations=agent["configuration"].get("tools", [])
+                )
+            ]
+
         self.model_setting = dict(
             {
                 k: float(v) if isinstance(v, Decimal) else v
@@ -63,11 +76,7 @@ class GeminiEventHandler(AIAgentEventHandler):
             },
             **{
                 "system_instruction": agent["instructions"],
-                "tools": [
-                    types.Tool(
-                        function_declarations=agent["configuration"].get("tools", [])
-                    )
-                ],
+                "tools": tools,
             },
         )
         self.assistant_messages = []
