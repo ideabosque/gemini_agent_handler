@@ -52,7 +52,6 @@ class GeminiEventHandler(AIAgentEventHandler):
         """
         AIAgentEventHandler.__init__(self, logger, agent, **setting)
 
-        self.logger = logger
         self.client = genai.Client(api_key=agent["configuration"].get("api_key"))
         self.model = agent["configuration"].get("model")
 
