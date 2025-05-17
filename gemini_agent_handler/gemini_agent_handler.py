@@ -510,7 +510,7 @@ class GeminiEventHandler(AIAgentEventHandler):
         if self.assistant_messages:
             index = self.assistant_messages[-1]["index"]
             message_id = self.assistant_messages[-1]["message_id"]
-            self.send_data_to_websocket(
+            self.send_data_to_stream(
                 index=index,
                 data_format=output_format,
                 chunk_delta=" ",
@@ -531,7 +531,7 @@ class GeminiEventHandler(AIAgentEventHandler):
                 continue
 
             if not message_id:
-                self.send_data_to_websocket(
+                self.send_data_to_stream(
                     index=index,
                     data_format=output_format,
                 )
@@ -560,7 +560,7 @@ class GeminiEventHandler(AIAgentEventHandler):
                 if len(accumulated_partial_text) >= int(
                     self.setting.get("accumulated_partial_text_buffer", "10")
                 ):
-                    self.send_data_to_websocket(
+                    self.send_data_to_stream(
                         index=index,
                         data_format=output_format,
                         chunk_delta=accumulated_partial_text,
@@ -569,7 +569,7 @@ class GeminiEventHandler(AIAgentEventHandler):
                     index += 1
 
         if len(accumulated_partial_text) > 0:
-            self.send_data_to_websocket(
+            self.send_data_to_stream(
                 index=index,
                 data_format=output_format,
                 chunk_delta=accumulated_partial_text,
@@ -605,7 +605,7 @@ class GeminiEventHandler(AIAgentEventHandler):
             )
             return
 
-        self.send_data_to_websocket(
+        self.send_data_to_stream(
             index=index,
             data_format=output_format,
             is_message_end=True,
