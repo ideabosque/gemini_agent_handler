@@ -52,7 +52,16 @@ class GeminiEventHandler(AIAgentEventHandler):
         """
         AIAgentEventHandler.__init__(self, logger, agent, **setting)
 
-        self.client = genai.Client(api_key=agent["configuration"].get("api_key"))
+        if all(setting.get(k) for k in ["project", "location"]):
+            vertex_credentials = {
+                "vertexai": True,
+                "project": setting["project"],
+                "location": setting["location"],
+            }
+            self.client = genai.Client(**vertex_credentials)
+        else:
+            self.client = genai.Client(api_key=agent["configuration"].get("api_key"))
+
         self.model = agent["configuration"].get("model")
 
         if any(
