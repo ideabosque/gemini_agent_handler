@@ -4,14 +4,17 @@ from __future__ import annotations
 
 __author__ = "bibow"
 
+import base64
 import logging
 import threading
 import traceback
 import uuid
 from decimal import Decimal
+from io import BytesIO
 from queue import Queue
 from typing import Any, Dict, List, Optional
 
+import httpx
 import pendulum
 from google import genai
 from google.genai import types
@@ -60,30 +63,46 @@ class GeminiEventHandler(AIAgentEventHandler):
             }
             self.client = genai.Client(**vertex_credentials)
         else:
-            self.client = genai.Client(api_key=agent["configuration"].get("api_key"))
+            self.client = genai.Client(
+                api_key=self.agent["configuration"].get("api_key")
+            )
 
-        self.model = agent["configuration"].get("model")
+        self.model = self.agent["configuration"].get("model")
 
         if any(
             tool["name"] == "google_search"
-            for tool in agent["configuration"].get("tools", [])
+            for tool in self.agent["configuration"].get("tools", [])
         ):
             tools = [types.Tool(google_search=types.GoogleSearch())]
         else:
+            # Initialize tools list with function declarations, excluding code execution
             tools = [
                 types.Tool(
-                    function_declarations=agent["configuration"].get("tools", [])
+                    function_declarations=[
+                        tool
+                        for tool in self.agent["configuration"].get("tools", [])
+                        if tool["name"]
+                        != "code_execution"  # Filter out code execution tool
+                    ]
                 )
             ]
+
+            # Add code execution tool if configured
+            if any(
+                tool["name"] == "code_execution"
+                for tool in self.agent["configuration"].get("tools", [])
+            ):
+                # Append code execution capability as a separate tool
+                tools.append(types.Tool(code_execution=types.ToolCodeExecution))
 
         self.model_setting = dict(
             {
                 k: float(v) if isinstance(v, Decimal) else v
-                for k, v in agent["configuration"].items()
+                for k, v in self.agent["configuration"].items()
                 if k not in ["api_key", "tools", "model", "text"]
             },
             **{
-                "system_instruction": agent["instructions"],
+                "system_instruction": self.agent["instructions"],
                 "tools": tools,
             },
         )
@@ -129,6 +148,7 @@ class GeminiEventHandler(AIAgentEventHandler):
         input_messages: List[Dict[str, Any]],
         queue: Queue = None,
         stream_event: threading.Event = None,
+        input_files: List[str, Any] = [],
         model_setting: Dict[str, Any] = None,
     ) -> Optional[str]:
         """
@@ -169,6 +189,19 @@ class GeminiEventHandler(AIAgentEventHandler):
                 for msg in input_messages
                 if msg["role"] in ["user", "assistant", self.agent["tool_call_role"]]
             ]
+
+            _input_messages = self._process_input_messages(input_messages)
+
+            # Process and append any input files to the last user message
+            if input_files and _input_messages and _input_messages[-1].role == "user":
+                for input_file in input_files:
+                    # Upload and convert file to Gemini-compatible format
+                    uploaded_file = self.insert_file(**input_file)
+                    _input_messages[-1].parts.append(
+                        types.Part(inline_data=uploaded_file),
+                    )
+                    self.uploaded_files.append({"file_name": uploaded_file.name})
+
             response = self.invoke_model(
                 **{
                     "input": _input_messages,
@@ -191,6 +224,45 @@ class GeminiEventHandler(AIAgentEventHandler):
         except Exception as e:
             self.logger.error(f"Error in ask_model: {str(e)}")
             raise Exception(f"Failed to process model request: {str(e)}")
+
+    def _process_input_messages(
+        self, input_messages: List[Dict[str, Any]]
+    ) -> List[types.Content]:
+        _input_messages = []
+        for msg in list(
+            filter(
+                lambda msg: msg["role"]
+                in ["user", "assistant", self.agent["tool_call_role"]],
+                input_messages,
+            )
+        ):
+            # Check if content can be loaded as JSON and convert if needed
+            try:
+                contents = Utility.json_loads(msg["content"])
+                parts = []
+                for content in contents:
+                    if content["type"] == "input_text":
+                        parts.append(types.Part(text=content["text"]))
+                    elif content["type"] == "input_file":
+                        file = self.get_file(**{"file_name": content["file_name"]})
+                        parts.append(types.Part(inline_data=file))
+                    else:
+                        raise Exception(f"Unsupported content type: {content['type']}")
+
+                _input_messages.append(
+                    types.Content(
+                        role="user" if msg["role"] == "user" else "model",
+                        parts=parts,
+                    )
+                )
+            except:
+                _input_messages.append(
+                    types.Content(
+                        role="user" if msg["role"] == "user" else "model",
+                        parts=[types.Part(text=msg["content"])],
+                    )
+                )
+        return _input_messages
 
     def handle_function_call(
         self,
@@ -628,3 +700,29 @@ class GeminiEventHandler(AIAgentEventHandler):
         # Signal that streaming has finished
         if stream_event:
             stream_event.set()
+
+    def insert_file(self, **kwargs: Dict[str, Any]) -> types.File:
+        if "encoded_content" in kwargs:
+            encoded_content = kwargs["encoded_content"]
+            # Decode the Base64 string
+            decoded_content = base64.b64decode(encoded_content)
+
+            # Save the decoded content into a BytesIO object
+            content_io = BytesIO(decoded_content)
+
+            # Assign a filename to the BytesIO object
+            content_io.name = kwargs["filename"]
+        elif "file_uri" in kwargs:
+            content_io = BytesIO(httpx.get(kwargs["file_uri"]).content)
+        else:
+            raise Exception("No file content provided")
+
+        file = self.client.files.upload(
+            file=content_io,
+            config=types.UploadFileConfig(mime_type=kwargs["mime_type"]),
+        )
+        return file
+
+    def get_file(self, **kwargs: Dict[str, Any]) -> types.File:
+        file = self.client.files.get(name=kwargs["file_name"])
+        return file
