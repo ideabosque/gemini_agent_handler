@@ -491,8 +491,8 @@ class GeminiEventHandler(AIAgentEventHandler):
         function_response_part = types.Part.from_function_response(
             name=tool_call.name,
             response={
-                "result": Utility.json_loads(
-                    Utility.json_dumps(function_output), parser_number=False
+                "result": Utility.json_normalize(
+                    function_output, parser_number=False
                 )
             },
         )
