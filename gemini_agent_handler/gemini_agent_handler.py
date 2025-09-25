@@ -143,6 +143,7 @@ class GeminiEventHandler(AIAgentEventHandler):
             self.logger.error(f"Error invoking model: {str(e)}")
             raise Exception(f"Failed to invoke model: {str(e)}")
 
+    @Utility.performance_monitor.monitor_operation(operation_name="Gemini")
     def ask_model(
         self,
         input_messages: List[Dict[str, Any]],
@@ -491,9 +492,7 @@ class GeminiEventHandler(AIAgentEventHandler):
         function_response_part = types.Part.from_function_response(
             name=tool_call.name,
             response={
-                "result": Utility.json_normalize(
-                    function_output, parser_number=False
-                )
+                "result": Utility.json_normalize(function_output, parser_number=False)
             },
         )
 
