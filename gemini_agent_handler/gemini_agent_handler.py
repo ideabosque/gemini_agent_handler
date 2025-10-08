@@ -543,6 +543,34 @@ class GeminiEventHandler(AIAgentEventHandler):
             types.Content(role="user", parts=[function_response_part])
         )  # Append the function response
 
+    def _check_retry_limit(self, retry_count: int) -> None:
+        """
+        Check if retry limit has been exceeded and raise exception if so.
+
+        Args:
+            retry_count: Current retry count
+
+        Raises:
+            Exception: If retry_count exceeds MAX_RETRIES
+        """
+        MAX_RETRIES = 5
+        if retry_count > MAX_RETRIES:
+            error_msg = f"Maximum retry limit ({MAX_RETRIES}) exceeded for empty responses"
+            self.logger.error(error_msg)
+            raise Exception(error_msg)
+
+    def _has_valid_content(self, text: str) -> bool:
+        """
+        Check if response text contains valid content.
+
+        Args:
+            text: Response text to check
+
+        Returns:
+            True if text is not None/empty/whitespace-only, False otherwise
+        """
+        return bool(text and text.strip())
+
     def handle_response(
         self,
         response: Any,
@@ -552,24 +580,17 @@ class GeminiEventHandler(AIAgentEventHandler):
         """
         Processes a non-streaming model response.
 
+        Handles three scenarios:
+        1. Function call → Execute and recurse
+        2. Empty response → Retry up to 5 times
+        3. Valid response → Set final_output
+
         Args:
             response: Complete model response object
             input_messages: Current conversation history
-            retry_count: Current retry count (max 5 retries allowed)
-
-        The function:
-        1. Checks for function calls in the response
-        2. Handles any function calls found
-        3. Updates conversation with text responses
-        4. Stores final output message
-        5. Retries on empty responses up to MAX_RETRIES times
+            retry_count: Current retry count (max 5 retries)
         """
-        # Check retry limit
-        MAX_RETRIES = 5
-        if retry_count > MAX_RETRIES:
-            error_msg = f"Maximum retry limit ({MAX_RETRIES}) exceeded for empty responses"
-            self.logger.error(error_msg)
-            raise Exception(error_msg)
+        self._check_retry_limit(retry_count)
 
         candidate = response.candidates[0]
         has_function_call = any(
@@ -577,47 +598,40 @@ class GeminiEventHandler(AIAgentEventHandler):
             for part in candidate.content.parts
         )
 
-        # Check if response has actual text content
-        has_text_content = bool(response.text and response.text.strip())
-
+        # Scenario 1: Handle function calls
         if has_function_call:
-            # Handle function calls
             for part in candidate.content.parts:
                 if hasattr(part, "function_call") and part.function_call:
-                    tool_call = part.function_call
-
                     input_messages = self.handle_function_call(
-                        tool_call, input_messages
+                        part.function_call, input_messages
                     )
-                else:
-                    if part.text:
-                        input_messages.append(
-                            types.Content(
-                                role="model",
-                                parts=[types.Part(text=part.text)],
-                            )
-                        )
+                elif part.text:
+                    input_messages.append(
+                        types.Content(role="model", parts=[types.Part(text=part.text)])
+                    )
 
-            response = self.invoke_model(**{"input": input_messages, "stream": False})
-            # Reset retry count for function call flow (not an error retry)
-            self.handle_response(response, input_messages, retry_count=0)
-        elif not has_text_content:
-            # If we received no content and no function call, retry the request
+            # Recurse with fresh response (reset retry count)
+            next_response = self.invoke_model(**{"input": input_messages, "stream": False})
+            self.handle_response(next_response, input_messages, retry_count=0)
+            return
+
+        # Scenario 2: Empty response - retry
+        if not self._has_valid_content(response.text):
             self.logger.warning(
-                f"Received empty response from model, retrying request (attempt {retry_count + 1}/{MAX_RETRIES})..."
+                f"Received empty response from model, retrying (attempt {retry_count + 1}/5)..."
             )
-            response = self.invoke_model(**{"input": input_messages, "stream": False})
-            # Increment retry count for empty response retry
-            self.handle_response(response, input_messages, retry_count=retry_count + 1)
-        else:
-            # Valid response with text content
-            timestamp = pendulum.now("UTC").int_timestamp
-            message_id = f"msg-gemini-{self.model}-{timestamp}-{str(uuid.uuid4())[:8]}"
-            self.final_output = {
-                "message_id": message_id,
-                "role": "assistant",
-                "content": response.text,
-            }
+            next_response = self.invoke_model(**{"input": input_messages, "stream": False})
+            self.handle_response(next_response, input_messages, retry_count=retry_count + 1)
+            return
+
+        # Scenario 3: Valid response - set final output
+        timestamp = pendulum.now("UTC").int_timestamp
+        message_id = f"msg-gemini-{self.model}-{timestamp}-{str(uuid.uuid4())[:8]}"
+        self.final_output = {
+            "message_id": message_id,
+            "role": "assistant",
+            "content": response.text,
+        }
 
     def handle_stream(
         self,
@@ -629,35 +643,27 @@ class GeminiEventHandler(AIAgentEventHandler):
         """
         Processes streaming responses from the model.
 
+        Handles three scenarios:
+        1. Function call → Execute and recurse
+        2. Empty stream → Retry up to 5 times
+        3. Valid stream → Accumulate and set final_output
+
         Args:
             response_stream: Iterator of response chunks from model
             input_messages: Current conversation history
             stream_event: Event to signal streaming completion
-            retry_count: Current retry count (max 5 retries allowed)
-
-        The function:
-        1. Accumulates text chunks from the stream
-        2. Handles different output formats (text, JSON)
-        3. Processes any function calls found in stream
-        4. Sends incremental updates via WebSocket
-        5. Maintains conversation state and history
+            retry_count: Current retry count (max 5 retries)
         """
-        # Check retry limit
-        MAX_RETRIES = 5
-        if retry_count > MAX_RETRIES:
-            error_msg = f"Maximum retry limit ({MAX_RETRIES}) exceeded for empty responses"
-            self.logger.error(error_msg)
-            raise Exception(error_msg)
+        self._check_retry_limit(retry_count)
 
-        # Generate message_id at the start to ensure it's never None
+        # Initialize state
         timestamp = pendulum.now("UTC").int_timestamp
         message_id = f"msg-gemini-{self.model}-{timestamp}-{str(uuid.uuid4())[:8]}"
-
         tool_call = None
         self.accumulated_text = ""
         accumulated_partial_json = ""
         accumulated_partial_text = ""
-        received_any_content = False  # Track if we received any actual content
+        received_any_content = False
 
         output_format = (
             self.model_setting.get("text", {"format": {"type": "text"}})
@@ -667,137 +673,93 @@ class GeminiEventHandler(AIAgentEventHandler):
         index = 0
         message_started = False
 
+        # Resume from previous assistant message if exists
         if self.assistant_messages:
             index = self.assistant_messages[-1]["index"]
             message_id = self.assistant_messages[-1]["message_id"]
-            self.send_data_to_stream(
-                index=index,
-                data_format=output_format,
-                chunk_delta=" ",
-            )
+            self.send_data_to_stream(index=index, data_format=output_format, chunk_delta=" ")
             index += 1
             message_started = True
 
         try:
+            # Process stream chunks
             for chunk in response_stream:
-
-                # if chunk.candidates:
                 candidate = chunk.candidates[0]
 
-                # Check for function_call in this chunk
+                # Detect function calls
                 if candidate.content.parts and hasattr(candidate.content.parts[0], 'function_call'):
                     chunk_function_call = candidate.content.parts[0].function_call
                     if chunk_function_call:
                         tool_call = chunk_function_call
-                        # Mark that we received content (function call counts as content)
                         received_any_content = True
 
                 # Skip empty text chunks
                 if not chunk.text:
                     continue
 
-                # Mark that we received content
                 received_any_content = True
 
+                # Start message on first text chunk
                 if not message_started:
-                    self.send_data_to_stream(
-                        index=index,
-                        data_format=output_format,
-                    )
+                    self.send_data_to_stream(index=index, data_format=output_format)
                     index += 1
                     message_started = True
 
+                # Process text based on output format
                 print(chunk.text, end="", flush=True)
                 if output_format in ["json_object", "json_schema"]:
                     accumulated_partial_json += chunk.text
                     index, self.accumulated_text, accumulated_partial_json = (
                         self.process_and_send_json(
-                            index,
-                            self.accumulated_text,
-                            accumulated_partial_json,
-                            output_format,
+                            index, self.accumulated_text, accumulated_partial_json, output_format
                         )
                     )
                 else:
                     self.accumulated_text += chunk.text
                     accumulated_partial_text += chunk.text
-                    # Check if text contains XML-style tags and update format
                     index, accumulated_partial_text = self.process_text_content(
                         index, accumulated_partial_text, output_format
                     )
 
-            if len(accumulated_partial_text) > 0:
+            # Send any remaining partial text
+            if accumulated_partial_text:
                 self.send_data_to_stream(
-                    index=index,
-                    data_format=output_format,
-                    chunk_delta=accumulated_partial_text,
+                    index=index, data_format=output_format, chunk_delta=accumulated_partial_text
                 )
-                accumulated_partial_text = ""
                 index += 1
 
-            # Handle tool usage if detected
+            # Scenario 1: Handle function call
             if tool_call:
                 if self.accumulated_text:
                     input_messages.append(
-                        types.Content(
-                            role="model",
-                            parts=[types.Part(text=self.accumulated_text)],
-                        )
+                        types.Content(role="model", parts=[types.Part(text=self.accumulated_text)])
                     )
-                    self.assistant_messages.append(
-                        {
-                            "message_id": message_id,
-                            "content": self.accumulated_text,
-                            "index": index,
-                        }
-                    )
+                    self.assistant_messages.append({
+                        "message_id": message_id,
+                        "content": self.accumulated_text,
+                        "index": index,
+                    })
                 input_messages = self.handle_function_call(tool_call, input_messages)
-                response = self.invoke_model(
-                    **{
-                        "input": input_messages,
-                        "stream": bool(stream_event),
-                    }
-                )
-                # Reset retry count for function call flow (not an error retry)
-                self.handle_stream(
-                    response,
-                    input_messages=input_messages,
-                    stream_event=stream_event,
-                    retry_count=0
-                )
+                next_response = self.invoke_model(**{"input": input_messages, "stream": bool(stream_event)})
+                self.handle_stream(next_response, input_messages, stream_event, retry_count=0)
                 return
 
-            # If we received no content and no tool call, retry the request
-            if not received_any_content and not tool_call:
+            # Scenario 2: Empty stream - retry
+            if not received_any_content:
                 self.logger.warning(
-                    f"Received empty response from model, retrying request (attempt {retry_count + 1}/{MAX_RETRIES})..."
+                    f"Received empty response from model, retrying (attempt {retry_count + 1}/5)..."
                 )
-                response = self.invoke_model(
-                    **{
-                        "input": input_messages,
-                        "stream": bool(stream_event),
-                    }
-                )
-                # Increment retry count for empty response retry
-                self.handle_stream(
-                    response,
-                    input_messages=input_messages,
-                    stream_event=stream_event,
-                    retry_count=retry_count + 1
-                )
+                next_response = self.invoke_model(**{"input": input_messages, "stream": bool(stream_event)})
+                self.handle_stream(next_response, input_messages, stream_event, retry_count + 1)
                 return
 
-            self.send_data_to_stream(
-                index=index,
-                data_format=output_format,
-                is_message_end=True,
-            )
+            # Scenario 3: Valid stream - finalize
+            self.send_data_to_stream(index=index, data_format=output_format, is_message_end=True)
 
+            # Merge assistant messages
             while self.assistant_messages:
                 assistant_message = self.assistant_messages.pop()
-                self.accumulated_text = (
-                    assistant_message["content"] + " " + self.accumulated_text
-                )
+                self.accumulated_text = assistant_message["content"] + " " + self.accumulated_text
 
             self.final_output = {
                 "message_id": message_id,
@@ -807,15 +769,13 @@ class GeminiEventHandler(AIAgentEventHandler):
 
         except Exception as e:
             self.logger.error(f"Error in handle_stream: {str(e)}")
-            # Ensure final_output is set even on error
             self.final_output = {
                 "message_id": message_id,
                 "role": "assistant",
-                "content": self.accumulated_text if self.accumulated_text else "",
+                "content": self.accumulated_text or "",
             }
             raise
         finally:
-            # Always signal that streaming has finished
             if stream_event:
                 stream_event.set()
 
