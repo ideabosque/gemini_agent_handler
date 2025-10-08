@@ -39,6 +39,45 @@ class GeminiEventHandler(AIAgentEventHandler):
     - Supports WebSocket streaming for real-time updates
     """
 
+    @staticmethod
+    def _sanitize_tool_schema(tool: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Recursively remove JSON Schema fields that aren't compatible with Gemini API.
+
+        Args:
+            tool: Tool definition dictionary
+
+        Returns:
+            Sanitized tool definition
+        """
+        if not isinstance(tool, dict):
+            return tool
+
+        # Fields to remove that are valid in JSON Schema but not in Gemini API
+        fields_to_remove = ['additional_properties', 'additionalProperties']
+
+        sanitized = {}
+        for key, value in tool.items():
+            if key in fields_to_remove:
+                continue
+
+            # Remove 'required' field if this is not an object type
+            # Gemini only allows 'required' for objects, not arrays or other types
+            if key == 'required' and tool.get('type') != 'object':
+                continue
+
+            if isinstance(value, dict):
+                sanitized[key] = GeminiEventHandler._sanitize_tool_schema(value)
+            elif isinstance(value, list):
+                sanitized[key] = [
+                    GeminiEventHandler._sanitize_tool_schema(item) if isinstance(item, dict) else item
+                    for item in value
+                ]
+            else:
+                sanitized[key] = value
+
+        return sanitized
+
     def __init__(
         self,
         logger: logging.Logger,
@@ -76,15 +115,15 @@ class GeminiEventHandler(AIAgentEventHandler):
             tools = [types.Tool(google_search=types.GoogleSearch())]
         else:
             # Initialize tools list with function declarations, excluding code execution
+            # Sanitize tools to remove incompatible JSON Schema fields
+            sanitized_tools = [
+                self._sanitize_tool_schema(tool)
+                for tool in self.agent["configuration"].get("tools", [])
+                if tool["name"] != "code_execution"  # Filter out code execution tool
+            ]
+
             tools = [
-                types.Tool(
-                    function_declarations=[
-                        tool
-                        for tool in self.agent["configuration"].get("tools", [])
-                        if tool["name"]
-                        != "code_execution"  # Filter out code execution tool
-                    ]
-                )
+                types.Tool(function_declarations=sanitized_tools)
             ]
 
             # Add code execution tool if configured
