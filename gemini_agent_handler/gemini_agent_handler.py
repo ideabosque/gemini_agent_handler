@@ -54,7 +54,7 @@ class GeminiEventHandler(AIAgentEventHandler):
             return tool
 
         # Fields to remove that are valid in JSON Schema but not in Gemini API
-        fields_to_remove = ['additional_properties', 'additionalProperties']
+        fields_to_remove = ["additional_properties", "additionalProperties"]
 
         sanitized = {}
         for key, value in tool.items():
@@ -63,14 +63,18 @@ class GeminiEventHandler(AIAgentEventHandler):
 
             # Remove 'required' field if this is not an object type
             # Gemini only allows 'required' for objects, not arrays or other types
-            if key == 'required' and tool.get('type') != 'object':
+            if key == "required" and tool.get("type") != "object":
                 continue
 
             if isinstance(value, dict):
                 sanitized[key] = GeminiEventHandler._sanitize_tool_schema(value)
             elif isinstance(value, list):
                 sanitized[key] = [
-                    GeminiEventHandler._sanitize_tool_schema(item) if isinstance(item, dict) else item
+                    (
+                        GeminiEventHandler._sanitize_tool_schema(item)
+                        if isinstance(item, dict)
+                        else item
+                    )
                     for item in value
                 ]
             else:
@@ -122,9 +126,7 @@ class GeminiEventHandler(AIAgentEventHandler):
                 if tool["name"] != "code_execution"  # Filter out code execution tool
             ]
 
-            tools = [
-                types.Tool(function_declarations=sanitized_tools)
-            ]
+            tools = [types.Tool(function_declarations=sanitized_tools)]
 
             # Add code execution tool if configured
             if any(
@@ -433,7 +435,6 @@ class GeminiEventHandler(AIAgentEventHandler):
         """
         try:
             arguments = function_call_data.get("arguments", {})
-            arguments["endpoint_id"] = self._endpoint_id
 
             return arguments
 
@@ -555,7 +556,9 @@ class GeminiEventHandler(AIAgentEventHandler):
         """
         MAX_RETRIES = 5
         if retry_count > MAX_RETRIES:
-            error_msg = f"Maximum retry limit ({MAX_RETRIES}) exceeded for empty responses"
+            error_msg = (
+                f"Maximum retry limit ({MAX_RETRIES}) exceeded for empty responses"
+            )
             self.logger.error(error_msg)
             raise Exception(error_msg)
 
@@ -611,7 +614,9 @@ class GeminiEventHandler(AIAgentEventHandler):
                     )
 
             # Recurse with fresh response (reset retry count)
-            next_response = self.invoke_model(**{"input": input_messages, "stream": False})
+            next_response = self.invoke_model(
+                **{"input": input_messages, "stream": False}
+            )
             self.handle_response(next_response, input_messages, retry_count=0)
             return
 
@@ -620,8 +625,12 @@ class GeminiEventHandler(AIAgentEventHandler):
             self.logger.warning(
                 f"Received empty response from model, retrying (attempt {retry_count + 1}/5)..."
             )
-            next_response = self.invoke_model(**{"input": input_messages, "stream": False})
-            self.handle_response(next_response, input_messages, retry_count=retry_count + 1)
+            next_response = self.invoke_model(
+                **{"input": input_messages, "stream": False}
+            )
+            self.handle_response(
+                next_response, input_messages, retry_count=retry_count + 1
+            )
             return
 
         # Scenario 3: Valid response - set final output
@@ -677,7 +686,9 @@ class GeminiEventHandler(AIAgentEventHandler):
         if self.assistant_messages:
             index = self.assistant_messages[-1]["index"]
             message_id = self.assistant_messages[-1]["message_id"]
-            self.send_data_to_stream(index=index, data_format=output_format, chunk_delta=" ")
+            self.send_data_to_stream(
+                index=index, data_format=output_format, chunk_delta=" "
+            )
             index += 1
             message_started = True
 
@@ -687,7 +698,9 @@ class GeminiEventHandler(AIAgentEventHandler):
                 candidate = chunk.candidates[0]
 
                 # Detect function calls
-                if candidate.content.parts and hasattr(candidate.content.parts[0], 'function_call'):
+                if candidate.content.parts and hasattr(
+                    candidate.content.parts[0], "function_call"
+                ):
                     chunk_function_call = candidate.content.parts[0].function_call
                     if chunk_function_call:
                         tool_call = chunk_function_call
@@ -711,7 +724,10 @@ class GeminiEventHandler(AIAgentEventHandler):
                     accumulated_partial_json += chunk.text
                     index, self.accumulated_text, accumulated_partial_json = (
                         self.process_and_send_json(
-                            index, self.accumulated_text, accumulated_partial_json, output_format
+                            index,
+                            self.accumulated_text,
+                            accumulated_partial_json,
+                            output_format,
                         )
                     )
                 else:
@@ -724,7 +740,9 @@ class GeminiEventHandler(AIAgentEventHandler):
             # Send any remaining partial text
             if accumulated_partial_text:
                 self.send_data_to_stream(
-                    index=index, data_format=output_format, chunk_delta=accumulated_partial_text
+                    index=index,
+                    data_format=output_format,
+                    chunk_delta=accumulated_partial_text,
                 )
                 index += 1
 
@@ -732,16 +750,24 @@ class GeminiEventHandler(AIAgentEventHandler):
             if tool_call:
                 if self.accumulated_text:
                     input_messages.append(
-                        types.Content(role="model", parts=[types.Part(text=self.accumulated_text)])
+                        types.Content(
+                            role="model", parts=[types.Part(text=self.accumulated_text)]
+                        )
                     )
-                    self.assistant_messages.append({
-                        "message_id": message_id,
-                        "content": self.accumulated_text,
-                        "index": index,
-                    })
+                    self.assistant_messages.append(
+                        {
+                            "message_id": message_id,
+                            "content": self.accumulated_text,
+                            "index": index,
+                        }
+                    )
                 input_messages = self.handle_function_call(tool_call, input_messages)
-                next_response = self.invoke_model(**{"input": input_messages, "stream": bool(stream_event)})
-                self.handle_stream(next_response, input_messages, stream_event, retry_count=0)
+                next_response = self.invoke_model(
+                    **{"input": input_messages, "stream": bool(stream_event)}
+                )
+                self.handle_stream(
+                    next_response, input_messages, stream_event, retry_count=0
+                )
                 return
 
             # Scenario 2: Empty stream - retry
@@ -749,17 +775,25 @@ class GeminiEventHandler(AIAgentEventHandler):
                 self.logger.warning(
                     f"Received empty response from model, retrying (attempt {retry_count + 1}/5)..."
                 )
-                next_response = self.invoke_model(**{"input": input_messages, "stream": bool(stream_event)})
-                self.handle_stream(next_response, input_messages, stream_event, retry_count + 1)
+                next_response = self.invoke_model(
+                    **{"input": input_messages, "stream": bool(stream_event)}
+                )
+                self.handle_stream(
+                    next_response, input_messages, stream_event, retry_count + 1
+                )
                 return
 
             # Scenario 3: Valid stream - finalize
-            self.send_data_to_stream(index=index, data_format=output_format, is_message_end=True)
+            self.send_data_to_stream(
+                index=index, data_format=output_format, is_message_end=True
+            )
 
             # Merge assistant messages
             while self.assistant_messages:
                 assistant_message = self.assistant_messages.pop()
-                self.accumulated_text = assistant_message["content"] + " " + self.accumulated_text
+                self.accumulated_text = (
+                    assistant_message["content"] + " " + self.accumulated_text
+                )
 
             self.final_output = {
                 "message_id": message_id,
