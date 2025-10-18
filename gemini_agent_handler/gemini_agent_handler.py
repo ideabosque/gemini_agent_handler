@@ -149,6 +149,104 @@ class GeminiEventHandler(AIAgentEventHandler):
         )
         self.assistant_messages = []
 
+        # Cache output format type for better performance (avoid repeated dict lookups)
+        self.output_format_type = (
+            self.model_setting.get("text", {})
+            .get("format", {})
+            .get("type", "text")
+        )
+
+    def _cleanup_input_messages(
+        self, input_messages: List[Dict[str, Any]]
+    ) -> List[types.Content]:
+        """
+        Filters out broken tool interaction sequences from message history and converts to Gemini format.
+        Valid sequences: assistant (with tool_calls) → tool results → assistant (final response).
+        Removes tool results without proper initiation or sequences without completion.
+
+        Optimized to O(n) complexity with single-pass algorithm.
+
+        Args:
+            input_messages: Raw conversation messages
+
+        Returns:
+            Filtered messages containing only valid sequences in Gemini types.Content format
+        """
+        if self.logger.isEnabledFor(logging.INFO):
+            self.logger.info(
+                f"[_cleanup_input_messages] Cleaning {len(input_messages)} messages"
+            )
+
+        if not input_messages:
+            return []
+
+        result = []
+        tool_call_role = self.agent["tool_call_role"]
+        i = 0
+
+        while i < len(input_messages):
+            current_msg = input_messages[i]
+            current_role = current_msg.get("role")
+
+            # Skip orphaned tool results (not preceded by assistant with tool_calls)
+            if current_role == tool_call_role:
+                if not (result and result[-1].get("role") == "assistant" and "tool_calls" in result[-1]):
+                    if self.logger.isEnabledFor(logging.INFO):
+                        self.logger.info(f"[_cleanup_input_messages] Skipping orphaned tool at [{i}]")
+                    i += 1
+                    continue
+                result.append(current_msg)
+                i += 1
+                continue
+
+            # Handle assistant messages with tool_calls
+            if current_role == "assistant" and "tool_calls" in current_msg:
+                # Find the end of tool results sequence
+                j = i + 1
+                while j < len(input_messages) and input_messages[j].get("role") == tool_call_role:
+                    j += 1
+
+                # Check if sequence is complete (followed by assistant message)
+                if j < len(input_messages) and input_messages[j].get("role") == "assistant":
+                    # Valid sequence: include the tool caller
+                    result.append(current_msg)
+                    i += 1
+                else:
+                    # Incomplete sequence: skip entire cycle
+                    if self.logger.isEnabledFor(logging.INFO):
+                        self.logger.info(f"[_cleanup_input_messages] Skipping incomplete cycle [{i}:{j - 1}]")
+                    i = j
+                continue
+
+            # Regular messages (user, assistant without tool_calls)
+            result.append(current_msg)
+            i += 1
+
+        if self.logger.isEnabledFor(logging.INFO):
+            self.logger.info(f"[_cleanup_input_messages] Retained {len(result)} messages")
+
+        return result
+
+    def _get_elapsed_time(self) -> float:
+        """
+        Get elapsed time in milliseconds from the first ask_model call.
+
+        Returns:
+            Elapsed time in milliseconds, or 0 if global start time not set
+        """
+        if not hasattr(self, '_global_start_time') or self._global_start_time is None:
+            return 0.0
+        return (pendulum.now("UTC") - self._global_start_time).total_seconds() * 1000
+
+    def reset_timeline(self) -> None:
+        """
+        Reset the global timeline for a new run.
+        Should be called at the start of each new user interaction/run.
+        """
+        self._global_start_time = None
+        if self.logger.isEnabledFor(logging.INFO):
+            self.logger.info(f"[TIMELINE] Timeline reset for new run")
+
     def invoke_model(self, **kwargs: Dict[str, Any]) -> Any:
         """
         Invokes the Gemini model with the provided configuration.
@@ -165,23 +263,33 @@ class GeminiEventHandler(AIAgentEventHandler):
             Exception: If model invocation fails
         """
         try:
+            invoke_start = pendulum.now("UTC")
 
             config = types.GenerateContentConfig(**self.model_setting)
 
             if kwargs.get("stream"):
-                return self.client.models.generate_content_stream(
+                result = self.client.models.generate_content_stream(
+                    model=self.model,
+                    contents=kwargs["input"],
+                    config=config,
+                )
+            else:
+                result = self.client.models.generate_content(
                     model=self.model,
                     contents=kwargs["input"],
                     config=config,
                 )
 
-            return self.client.models.generate_content(
-                model=self.model,
-                contents=kwargs["input"],
-                config=config,
-            )
+            invoke_end = pendulum.now("UTC")
+            invoke_time = (invoke_end - invoke_start).total_seconds() * 1000
+            if self.logger.isEnabledFor(logging.INFO):
+                elapsed = self._get_elapsed_time()
+                self.logger.info(f"[TIMELINE] T+{elapsed:.2f}ms: API call returned (took {invoke_time:.2f}ms)")
+
+            return result
         except Exception as e:
-            self.logger.error(f"Error invoking model: {str(e)}")
+            if self.logger.isEnabledFor(logging.ERROR):
+                self.logger.error(f"Error invoking model: {str(e)}")
             raise Exception(f"Failed to invoke model: {str(e)}")
 
     @Utility.performance_monitor.monitor_operation(operation_name="Gemini")
@@ -209,9 +317,31 @@ class GeminiEventHandler(AIAgentEventHandler):
         Raises:
             Exception: If request processing fails
         """
+        # Track preparation time
+        ask_model_start = pendulum.now("UTC")
+
+        # Track recursion depth to identify top-level vs recursive calls
+        if not hasattr(self, '_ask_model_depth'):
+            self._ask_model_depth = 0
+
+        self._ask_model_depth += 1
+        is_top_level = (self._ask_model_depth == 1)
+
+        # Initialize global start time only on top-level ask_model call
+        # Recursive calls will use the same start time for the entire run timeline
+        if is_top_level:
+            self._global_start_time = ask_model_start
+            if self.logger.isEnabledFor(logging.INFO):
+                self.logger.info(f"[TIMELINE] T+0ms: Run started - First ask_model call")
+        else:
+            if self.logger.isEnabledFor(logging.INFO):
+                elapsed = self._get_elapsed_time()
+                self.logger.info(f"[TIMELINE] T+{elapsed:.2f}ms: Recursive ask_model call started")
+
         try:
             if not self.client:
-                self.logger.error("No Gemini client provided.")
+                if self.logger.isEnabledFor(logging.ERROR):
+                    self.logger.error("No Gemini client provided.")
                 return None
 
             stream = True if queue is not None else False
@@ -220,19 +350,17 @@ class GeminiEventHandler(AIAgentEventHandler):
             if model_setting:
                 self.model_setting.update(model_setting)
 
+            # Clean up input messages to remove broken tool sequences (performance optimization)
+            cleanup_start = pendulum.now("UTC")
+            cleaned_messages = self._cleanup_input_messages(input_messages)
+            cleanup_end = pendulum.now("UTC")
+            cleanup_time = (cleanup_end - cleanup_start).total_seconds() * 1000
+
             timestamp = pendulum.now("UTC").int_timestamp
-            run_id = f"run-gemini-{self.model}-{timestamp}-{str(uuid.uuid4())[:8]}"
+            # Optimized UUID generation - use .hex instead of str() conversion
+            run_id = f"run-gemini-{self.model}-{timestamp}-{uuid.uuid4().hex[:8]}"
 
-            _input_messages = [
-                types.Content(
-                    role="user" if msg["role"] == "user" else "model",
-                    parts=[types.Part(text=msg["content"])],
-                )
-                for msg in input_messages
-                if msg["role"] in ["user", "assistant", self.agent["tool_call_role"]]
-            ]
-
-            _input_messages = self._process_input_messages(input_messages)
+            _input_messages = self._process_input_messages(cleaned_messages)
 
             # Process and append any input files to the last user message
             if input_files and _input_messages and _input_messages[-1].role == "user":
@@ -243,6 +371,13 @@ class GeminiEventHandler(AIAgentEventHandler):
                         types.Part(inline_data=uploaded_file),
                     )
                     self.uploaded_files.append({"file_name": uploaded_file.name})
+
+            # Track total preparation time before API call
+            preparation_end = pendulum.now("UTC")
+            preparation_time = (preparation_end - ask_model_start).total_seconds() * 1000
+            if self.logger.isEnabledFor(logging.INFO):
+                elapsed = self._get_elapsed_time()
+                self.logger.info(f"[TIMELINE] T+{elapsed:.2f}ms: Preparation complete (took {preparation_time:.2f}ms, cleanup: {cleanup_time:.2f}ms)")
 
             response = self.invoke_model(
                 **{
@@ -264,8 +399,19 @@ class GeminiEventHandler(AIAgentEventHandler):
             self.handle_response(response, _input_messages)
             return run_id
         except Exception as e:
-            self.logger.error(f"Error in ask_model: {str(e)}")
+            if self.logger.isEnabledFor(logging.ERROR):
+                self.logger.error(f"Error in ask_model: {str(e)}")
             raise Exception(f"Failed to process model request: {str(e)}")
+        finally:
+            # Decrement depth when exiting ask_model
+            self._ask_model_depth -= 1
+
+            # Reset timeline when returning to depth 0 (top-level call complete)
+            if self._ask_model_depth == 0:
+                if self.logger.isEnabledFor(logging.INFO):
+                    elapsed = self._get_elapsed_time()
+                    self.logger.info(f"[TIMELINE] T+{elapsed:.2f}ms: Run complete - Resetting timeline")
+                self._global_start_time = None
 
     def _process_input_messages(
         self, input_messages: List[Dict[str, Any]]
@@ -333,11 +479,15 @@ class GeminiEventHandler(AIAgentEventHandler):
         Raises:
             Exception: If function execution fails
         """
+        # Track function call timing
+        function_call_start = pendulum.now("UTC")
+
         try:
             # Extract function call metadata
             timestamp = pendulum.now("UTC").int_timestamp
+            # Optimized UUID generation
             tool_call_id = (
-                f"tool_call-gemini-{self.model}-{timestamp}-{str(uuid.uuid4())[:8]}"
+                f"tool_call-gemini-{self.model}-{timestamp}-{uuid.uuid4().hex[:8]}"
             )
             function_call_data = {
                 "id": tool_call_id,
@@ -347,27 +497,31 @@ class GeminiEventHandler(AIAgentEventHandler):
             }
 
             # Record initial function call
-            self.logger.info(
-                f"[handle_function_call] Starting function call recording for {function_call_data['name']}"
-            )
+            if self.logger.isEnabledFor(logging.INFO):
+                self.logger.info(
+                    f"[handle_function_call] Starting function call recording for {function_call_data['name']}"
+                )
             self._record_function_call_start(function_call_data)
 
             # Parse and process arguments
-            self.logger.info(
-                f"[handle_function_call] Processing arguments for function {function_call_data['name']}"
-            )
+            if self.logger.isEnabledFor(logging.INFO):
+                self.logger.info(
+                    f"[handle_function_call] Processing arguments for function {function_call_data['name']}"
+                )
             arguments = self._process_function_arguments(function_call_data)
 
             # Execute function and handle result
-            self.logger.info(
-                f"[handle_function_call] Executing function {function_call_data['name']} with arguments {arguments}"
-            )
+            if self.logger.isEnabledFor(logging.INFO):
+                self.logger.info(
+                    f"[handle_function_call] Executing function {function_call_data['name']} with arguments {arguments}"
+                )
             function_output = self._execute_function(function_call_data, arguments)
 
             # Update conversation history
-            self.logger.info(
-                f"[handle_function_call][{function_call_data['name']}] Updating conversation history"
-            )
+            if self.logger.isEnabledFor(logging.INFO):
+                self.logger.info(
+                    f"[handle_function_call][{function_call_data['name']}] Updating conversation history"
+                )
             self._update_conversation_history(
                 tool_call, function_output, input_messages
             )
@@ -393,10 +547,18 @@ class GeminiEventHandler(AIAgentEventHandler):
                     }
                 )
 
+            # Log function call execution time
+            function_call_end = pendulum.now("UTC")
+            function_call_time = (function_call_end - function_call_start).total_seconds() * 1000
+            if self.logger.isEnabledFor(logging.INFO):
+                elapsed = self._get_elapsed_time()
+                self.logger.info(f"[TIMELINE] T+{elapsed:.2f}ms: Function '{function_call_data['name']}' complete (took {function_call_time:.2f}ms)")
+
             return input_messages
 
         except Exception as e:
-            self.logger.error(f"Error in handle_function_call: {e}")
+            if self.logger.isEnabledFor(logging.ERROR):
+                self.logger.error(f"Error in handle_function_call: {e}")
             raise
 
     def _record_function_call_start(self, function_call_data: Dict[str, Any]) -> None:
@@ -475,16 +637,27 @@ class GeminiEventHandler(AIAgentEventHandler):
             )
 
         try:
+            # Cache JSON serialization to avoid duplicate work (performance optimization)
+            arguments_json = Utility.json_dumps(arguments)
+
             self.invoke_async_funct(
                 "async_insert_update_tool_call",
                 **{
                     "tool_call_id": function_call_data["id"],
-                    "arguments": Utility.json_dumps(arguments),
+                    "arguments": arguments_json,
                     "status": "in_progress",
                 },
             )
 
+            # Track actual function execution time
+            function_exec_start = pendulum.now("UTC")
             function_output = agent_function(**arguments)
+            function_exec_end = pendulum.now("UTC")
+            function_exec_time = (function_exec_end - function_exec_start).total_seconds() * 1000
+
+            if self.logger.isEnabledFor(logging.INFO):
+                elapsed = self._get_elapsed_time()
+                self.logger.info(f"[TIMELINE] T+{elapsed:.2f}ms: Function '{function_call_data['name']}' executed (took {function_exec_time:.2f}ms)")
 
             self.invoke_async_funct(
                 "async_insert_update_tool_call",
@@ -498,11 +671,14 @@ class GeminiEventHandler(AIAgentEventHandler):
 
         except Exception as e:
             log = traceback.format_exc()
+            # Reuse cached JSON serialization (performance optimization)
+            if 'arguments_json' not in locals():
+                arguments_json = Utility.json_dumps(arguments)
             self.invoke_async_funct(
                 "async_insert_update_tool_call",
                 **{
                     "tool_call_id": function_call_data["id"],
-                    "arguments": Utility.json_dumps(arguments),
+                    "arguments": arguments_json,
                     "status": "failed",
                     "notes": log,
                 },
@@ -622,9 +798,10 @@ class GeminiEventHandler(AIAgentEventHandler):
 
         # Scenario 2: Empty response - retry
         if not self._has_valid_content(response.text):
-            self.logger.warning(
-                f"Received empty response from model, retrying (attempt {retry_count + 1}/5)..."
-            )
+            if self.logger.isEnabledFor(logging.WARNING):
+                self.logger.warning(
+                    f"Received empty response from model, retrying (attempt {retry_count + 1}/5)..."
+                )
             next_response = self.invoke_model(
                 **{"input": input_messages, "stream": False}
             )
@@ -635,7 +812,8 @@ class GeminiEventHandler(AIAgentEventHandler):
 
         # Scenario 3: Valid response - set final output
         timestamp = pendulum.now("UTC").int_timestamp
-        message_id = f"msg-gemini-{self.model}-{timestamp}-{str(uuid.uuid4())[:8]}"
+        # Optimized UUID generation
+        message_id = f"msg-gemini-{self.model}-{timestamp}-{uuid.uuid4().hex[:8]}"
         self.final_output = {
             "message_id": message_id,
             "role": "assistant",
@@ -667,18 +845,17 @@ class GeminiEventHandler(AIAgentEventHandler):
 
         # Initialize state
         timestamp = pendulum.now("UTC").int_timestamp
-        message_id = f"msg-gemini-{self.model}-{timestamp}-{str(uuid.uuid4())[:8]}"
+        # Optimized UUID generation
+        message_id = f"msg-gemini-{self.model}-{timestamp}-{uuid.uuid4().hex[:8]}"
         tool_call = None
-        self.accumulated_text = ""
+        # Use list for efficient string concatenation (performance optimization)
+        accumulated_text_parts = []
         accumulated_partial_json = ""
         accumulated_partial_text = ""
         received_any_content = False
 
-        output_format = (
-            self.model_setting.get("text", {"format": {"type": "text"}})
-            .get("format", {"type": "text"})
-            .get("type", "text")
-        )
+        # Use cached output format type (performance optimization)
+        output_format = self.output_format_type
         index = 0
         message_started = False
 
@@ -720,18 +897,22 @@ class GeminiEventHandler(AIAgentEventHandler):
 
                 # Process text based on output format
                 print(chunk.text, end="", flush=True)
+                # Append to list instead of string concatenation (performance optimization)
+                accumulated_text_parts.append(chunk.text)
+
                 if output_format in ["json_object", "json_schema"]:
                     accumulated_partial_json += chunk.text
-                    index, self.accumulated_text, accumulated_partial_json = (
+                    # Temporarily build accumulated_text for processing
+                    temp_accumulated_text = ''.join(accumulated_text_parts)
+                    index, temp_accumulated_text, accumulated_partial_json = (
                         self.process_and_send_json(
                             index,
-                            self.accumulated_text,
+                            temp_accumulated_text,
                             accumulated_partial_json,
                             output_format,
                         )
                     )
                 else:
-                    self.accumulated_text += chunk.text
                     accumulated_partial_text += chunk.text
                     index, accumulated_partial_text = self.process_text_content(
                         index, accumulated_partial_text, output_format
@@ -746,18 +927,21 @@ class GeminiEventHandler(AIAgentEventHandler):
                 )
                 index += 1
 
+            # Build final accumulated text from parts (performance optimization)
+            final_accumulated_text = ''.join(accumulated_text_parts)
+
             # Scenario 1: Handle function call
             if tool_call:
-                if self.accumulated_text:
+                if final_accumulated_text:
                     input_messages.append(
                         types.Content(
-                            role="model", parts=[types.Part(text=self.accumulated_text)]
+                            role="model", parts=[types.Part(text=final_accumulated_text)]
                         )
                     )
                     self.assistant_messages.append(
                         {
                             "message_id": message_id,
-                            "content": self.accumulated_text,
+                            "content": final_accumulated_text,
                             "index": index,
                         }
                     )
@@ -772,9 +956,10 @@ class GeminiEventHandler(AIAgentEventHandler):
 
             # Scenario 2: Empty stream - retry
             if not received_any_content:
-                self.logger.warning(
-                    f"Received empty response from model, retrying (attempt {retry_count + 1}/5)..."
-                )
+                if self.logger.isEnabledFor(logging.WARNING):
+                    self.logger.warning(
+                        f"Received empty response from model, retrying (attempt {retry_count + 1}/5)..."
+                    )
                 next_response = self.invoke_model(
                     **{"input": input_messages, "stream": bool(stream_event)}
                 )
@@ -788,25 +973,32 @@ class GeminiEventHandler(AIAgentEventHandler):
                 index=index, data_format=output_format, is_message_end=True
             )
 
-            # Merge assistant messages
+            # Merge assistant messages (use list for efficient concatenation)
+            merged_parts = []
             while self.assistant_messages:
                 assistant_message = self.assistant_messages.pop()
-                self.accumulated_text = (
-                    assistant_message["content"] + " " + self.accumulated_text
-                )
+                merged_parts.insert(0, assistant_message["content"])
+                merged_parts.insert(1, " ")
+
+            if merged_parts:
+                merged_parts.append(final_accumulated_text)
+                final_accumulated_text = ''.join(merged_parts)
 
             self.final_output = {
                 "message_id": message_id,
                 "role": "assistant",
-                "content": self.accumulated_text,
+                "content": final_accumulated_text,
             }
 
         except Exception as e:
-            self.logger.error(f"Error in handle_stream: {str(e)}")
+            if self.logger.isEnabledFor(logging.ERROR):
+                self.logger.error(f"Error in handle_stream: {str(e)}")
+            # Build final text from parts even on error
+            final_text = ''.join(accumulated_text_parts) if accumulated_text_parts else ""
             self.final_output = {
                 "message_id": message_id,
                 "role": "assistant",
-                "content": self.accumulated_text or "",
+                "content": final_text,
             }
             raise
         finally:
