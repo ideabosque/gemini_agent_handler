@@ -136,6 +136,7 @@ class GeminiEventHandler(AIAgentEventHandler):
                 # Append code execution capability as a separate tool
                 tools.append(types.Tool(code_execution=types.ToolCodeExecution))
 
+        # Convert Decimal to float once during initialization (performance optimization)
         self.model_setting = dict(
             {
                 k: float(v) if isinstance(v, Decimal) else v
@@ -151,7 +152,8 @@ class GeminiEventHandler(AIAgentEventHandler):
 
         # Cache output format type for better performance (avoid repeated dict lookups)
         self.output_format_type = (
-            self.model_setting.get("text", {})
+            self.agent["configuration"]
+            .get("text", {})
             .get("format", {})
             .get("type", "text")
         )
@@ -190,9 +192,15 @@ class GeminiEventHandler(AIAgentEventHandler):
 
             # Skip orphaned tool results (not preceded by assistant with tool_calls)
             if current_role == tool_call_role:
-                if not (result and result[-1].get("role") == "assistant" and "tool_calls" in result[-1]):
+                if not (
+                    result
+                    and result[-1].get("role") == "assistant"
+                    and "tool_calls" in result[-1]
+                ):
                     if self.logger.isEnabledFor(logging.INFO):
-                        self.logger.info(f"[_cleanup_input_messages] Skipping orphaned tool at [{i}]")
+                        self.logger.info(
+                            f"[_cleanup_input_messages] Skipping orphaned tool at [{i}]"
+                        )
                     i += 1
                     continue
                 result.append(current_msg)
@@ -203,18 +211,26 @@ class GeminiEventHandler(AIAgentEventHandler):
             if current_role == "assistant" and "tool_calls" in current_msg:
                 # Find the end of tool results sequence
                 j = i + 1
-                while j < len(input_messages) and input_messages[j].get("role") == tool_call_role:
+                while (
+                    j < len(input_messages)
+                    and input_messages[j].get("role") == tool_call_role
+                ):
                     j += 1
 
                 # Check if sequence is complete (followed by assistant message)
-                if j < len(input_messages) and input_messages[j].get("role") == "assistant":
+                if (
+                    j < len(input_messages)
+                    and input_messages[j].get("role") == "assistant"
+                ):
                     # Valid sequence: include the tool caller
                     result.append(current_msg)
                     i += 1
                 else:
                     # Incomplete sequence: skip entire cycle
                     if self.logger.isEnabledFor(logging.INFO):
-                        self.logger.info(f"[_cleanup_input_messages] Skipping incomplete cycle [{i}:{j - 1}]")
+                        self.logger.info(
+                            f"[_cleanup_input_messages] Skipping incomplete cycle [{i}:{j - 1}]"
+                        )
                     i = j
                 continue
 
@@ -223,7 +239,9 @@ class GeminiEventHandler(AIAgentEventHandler):
             i += 1
 
         if self.logger.isEnabledFor(logging.INFO):
-            self.logger.info(f"[_cleanup_input_messages] Retained {len(result)} messages")
+            self.logger.info(
+                f"[_cleanup_input_messages] Retained {len(result)} messages"
+            )
 
         return result
 
@@ -234,7 +252,7 @@ class GeminiEventHandler(AIAgentEventHandler):
         Returns:
             Elapsed time in milliseconds, or 0 if global start time not set
         """
-        if not hasattr(self, '_global_start_time') or self._global_start_time is None:
+        if not hasattr(self, "_global_start_time") or self._global_start_time is None:
             return 0.0
         return (pendulum.now("UTC") - self._global_start_time).total_seconds() * 1000
 
@@ -284,7 +302,9 @@ class GeminiEventHandler(AIAgentEventHandler):
             invoke_time = (invoke_end - invoke_start).total_seconds() * 1000
             if self.logger.isEnabledFor(logging.INFO):
                 elapsed = self._get_elapsed_time()
-                self.logger.info(f"[TIMELINE] T+{elapsed:.2f}ms: API call returned (took {invoke_time:.2f}ms)")
+                self.logger.info(
+                    f"[TIMELINE] T+{elapsed:.2f}ms: API call returned (took {invoke_time:.2f}ms)"
+                )
 
             return result
         except Exception as e:
@@ -321,22 +341,26 @@ class GeminiEventHandler(AIAgentEventHandler):
         ask_model_start = pendulum.now("UTC")
 
         # Track recursion depth to identify top-level vs recursive calls
-        if not hasattr(self, '_ask_model_depth'):
+        if not hasattr(self, "_ask_model_depth"):
             self._ask_model_depth = 0
 
         self._ask_model_depth += 1
-        is_top_level = (self._ask_model_depth == 1)
+        is_top_level = self._ask_model_depth == 1
 
         # Initialize global start time only on top-level ask_model call
         # Recursive calls will use the same start time for the entire run timeline
         if is_top_level:
             self._global_start_time = ask_model_start
             if self.logger.isEnabledFor(logging.INFO):
-                self.logger.info(f"[TIMELINE] T+0ms: Run started - First ask_model call")
+                self.logger.info(
+                    f"[TIMELINE] T+0ms: Run started - First ask_model call"
+                )
         else:
             if self.logger.isEnabledFor(logging.INFO):
                 elapsed = self._get_elapsed_time()
-                self.logger.info(f"[TIMELINE] T+{elapsed:.2f}ms: Recursive ask_model call started")
+                self.logger.info(
+                    f"[TIMELINE] T+{elapsed:.2f}ms: Recursive ask_model call started"
+                )
 
         try:
             if not self.client:
@@ -374,10 +398,14 @@ class GeminiEventHandler(AIAgentEventHandler):
 
             # Track total preparation time before API call
             preparation_end = pendulum.now("UTC")
-            preparation_time = (preparation_end - ask_model_start).total_seconds() * 1000
+            preparation_time = (
+                preparation_end - ask_model_start
+            ).total_seconds() * 1000
             if self.logger.isEnabledFor(logging.INFO):
                 elapsed = self._get_elapsed_time()
-                self.logger.info(f"[TIMELINE] T+{elapsed:.2f}ms: Preparation complete (took {preparation_time:.2f}ms, cleanup: {cleanup_time:.2f}ms)")
+                self.logger.info(
+                    f"[TIMELINE] T+{elapsed:.2f}ms: Preparation complete (took {preparation_time:.2f}ms, cleanup: {cleanup_time:.2f}ms)"
+                )
 
             response = self.invoke_model(
                 **{
@@ -410,7 +438,9 @@ class GeminiEventHandler(AIAgentEventHandler):
             if self._ask_model_depth == 0:
                 if self.logger.isEnabledFor(logging.INFO):
                     elapsed = self._get_elapsed_time()
-                    self.logger.info(f"[TIMELINE] T+{elapsed:.2f}ms: Run complete - Resetting timeline")
+                    self.logger.info(
+                        f"[TIMELINE] T+{elapsed:.2f}ms: Run complete - Resetting timeline"
+                    )
                 self._global_start_time = None
 
     def _process_input_messages(
@@ -549,10 +579,14 @@ class GeminiEventHandler(AIAgentEventHandler):
 
             # Log function call execution time
             function_call_end = pendulum.now("UTC")
-            function_call_time = (function_call_end - function_call_start).total_seconds() * 1000
+            function_call_time = (
+                function_call_end - function_call_start
+            ).total_seconds() * 1000
             if self.logger.isEnabledFor(logging.INFO):
                 elapsed = self._get_elapsed_time()
-                self.logger.info(f"[TIMELINE] T+{elapsed:.2f}ms: Function '{function_call_data['name']}' complete (took {function_call_time:.2f}ms)")
+                self.logger.info(
+                    f"[TIMELINE] T+{elapsed:.2f}ms: Function '{function_call_data['name']}' complete (took {function_call_time:.2f}ms)"
+                )
 
             return input_messages
 
@@ -653,11 +687,15 @@ class GeminiEventHandler(AIAgentEventHandler):
             function_exec_start = pendulum.now("UTC")
             function_output = agent_function(**arguments)
             function_exec_end = pendulum.now("UTC")
-            function_exec_time = (function_exec_end - function_exec_start).total_seconds() * 1000
+            function_exec_time = (
+                function_exec_end - function_exec_start
+            ).total_seconds() * 1000
 
             if self.logger.isEnabledFor(logging.INFO):
                 elapsed = self._get_elapsed_time()
-                self.logger.info(f"[TIMELINE] T+{elapsed:.2f}ms: Function '{function_call_data['name']}' executed (took {function_exec_time:.2f}ms)")
+                self.logger.info(
+                    f"[TIMELINE] T+{elapsed:.2f}ms: Function '{function_call_data['name']}' executed (took {function_exec_time:.2f}ms)"
+                )
 
             self.invoke_async_funct(
                 "async_insert_update_tool_call",
@@ -672,7 +710,7 @@ class GeminiEventHandler(AIAgentEventHandler):
         except Exception as e:
             log = traceback.format_exc()
             # Reuse cached JSON serialization (performance optimization)
-            if 'arguments_json' not in locals():
+            if "arguments_json" not in locals():
                 arguments_json = Utility.json_dumps(arguments)
             self.invoke_async_funct(
                 "async_insert_update_tool_call",
@@ -903,7 +941,7 @@ class GeminiEventHandler(AIAgentEventHandler):
                 if output_format in ["json_object", "json_schema"]:
                     accumulated_partial_json += chunk.text
                     # Temporarily build accumulated_text for processing
-                    temp_accumulated_text = ''.join(accumulated_text_parts)
+                    temp_accumulated_text = "".join(accumulated_text_parts)
                     index, temp_accumulated_text, accumulated_partial_json = (
                         self.process_and_send_json(
                             index,
@@ -928,14 +966,15 @@ class GeminiEventHandler(AIAgentEventHandler):
                 index += 1
 
             # Build final accumulated text from parts (performance optimization)
-            final_accumulated_text = ''.join(accumulated_text_parts)
+            final_accumulated_text = "".join(accumulated_text_parts)
 
             # Scenario 1: Handle function call
             if tool_call:
                 if final_accumulated_text:
                     input_messages.append(
                         types.Content(
-                            role="model", parts=[types.Part(text=final_accumulated_text)]
+                            role="model",
+                            parts=[types.Part(text=final_accumulated_text)],
                         )
                     )
                     self.assistant_messages.append(
@@ -982,7 +1021,7 @@ class GeminiEventHandler(AIAgentEventHandler):
 
             if merged_parts:
                 merged_parts.append(final_accumulated_text)
-                final_accumulated_text = ''.join(merged_parts)
+                final_accumulated_text = "".join(merged_parts)
 
             self.final_output = {
                 "message_id": message_id,
@@ -994,7 +1033,9 @@ class GeminiEventHandler(AIAgentEventHandler):
             if self.logger.isEnabledFor(logging.ERROR):
                 self.logger.error(f"Error in handle_stream: {str(e)}")
             # Build final text from parts even on error
-            final_text = ''.join(accumulated_text_parts) if accumulated_text_parts else ""
+            final_text = (
+                "".join(accumulated_text_parts) if accumulated_text_parts else ""
+            )
             self.final_output = {
                 "message_id": message_id,
                 "role": "assistant",
