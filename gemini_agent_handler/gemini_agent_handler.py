@@ -98,16 +98,24 @@ class GeminiEventHandler(AIAgentEventHandler):
         """
         AIAgentEventHandler.__init__(self, logger, agent, **setting)
 
+        # Enable HTTP/2 for improved performance (multiplexing, header compression, better streaming)
+        http_options = types.HttpOptions(
+            client_args={"http2": True},  # Enable HTTP/2 for sync operations
+            async_client_args={"http2": True},  # Enable HTTP/2 for async operations
+        )
+
         if all(setting.get(k) for k in ["project", "location"]):
             vertex_credentials = {
                 "vertexai": True,
                 "project": setting["project"],
                 "location": setting["location"],
+                "http_options": http_options,
             }
             self.client = genai.Client(**vertex_credentials)
         else:
             self.client = genai.Client(
-                api_key=self.agent["configuration"].get("api_key")
+                api_key=self.agent["configuration"].get("api_key"),
+                http_options=http_options,
             )
 
         self.model = self.agent["configuration"].get("model")
@@ -973,7 +981,9 @@ class GeminiEventHandler(AIAgentEventHandler):
             # Assign a filename to the BytesIO object
             content_io.name = kwargs["filename"]
         elif "file_uri" in kwargs:
-            content_io = BytesIO(httpx.get(kwargs["file_uri"]).content)
+            # Use HTTP/2 for better performance when downloading files
+            with httpx.Client(http2=True, timeout=30.0) as http_client:
+                content_io = BytesIO(http_client.get(kwargs["file_uri"]).content)
         else:
             raise Exception("No file content provided")
 

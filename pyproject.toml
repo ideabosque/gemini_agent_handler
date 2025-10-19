@@ -42,7 +42,7 @@ dependencies = [
     "ai-agent-handler",
     "google-genai",
     "pendulum",
-    "httpx",
+    "httpx[http2]",
 ]
 
 [project.optional-dependencies]
