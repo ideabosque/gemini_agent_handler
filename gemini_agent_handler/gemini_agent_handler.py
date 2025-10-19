@@ -158,93 +158,6 @@ class GeminiEventHandler(AIAgentEventHandler):
             .get("type", "text")
         )
 
-    def _cleanup_input_messages(
-        self, input_messages: List[Dict[str, Any]]
-    ) -> List[types.Content]:
-        """
-        Filters out broken tool interaction sequences from message history and converts to Gemini format.
-        Valid sequences: assistant (with tool_calls) → tool results → assistant (final response).
-        Removes tool results without proper initiation or sequences without completion.
-
-        Optimized to O(n) complexity with single-pass algorithm.
-
-        Args:
-            input_messages: Raw conversation messages
-
-        Returns:
-            Filtered messages containing only valid sequences in Gemini types.Content format
-        """
-        if self.logger.isEnabledFor(logging.INFO):
-            self.logger.info(
-                f"[_cleanup_input_messages] Cleaning {len(input_messages)} messages"
-            )
-
-        if not input_messages:
-            return []
-
-        result = []
-        tool_call_role = self.agent["tool_call_role"]
-        i = 0
-
-        while i < len(input_messages):
-            current_msg = input_messages[i]
-            current_role = current_msg.get("role")
-
-            # Skip orphaned tool results (not preceded by assistant with tool_calls)
-            if current_role == tool_call_role:
-                if not (
-                    result
-                    and result[-1].get("role") == "assistant"
-                    and "tool_calls" in result[-1]
-                ):
-                    if self.logger.isEnabledFor(logging.INFO):
-                        self.logger.info(
-                            f"[_cleanup_input_messages] Skipping orphaned tool at [{i}]"
-                        )
-                    i += 1
-                    continue
-                result.append(current_msg)
-                i += 1
-                continue
-
-            # Handle assistant messages with tool_calls
-            if current_role == "assistant" and "tool_calls" in current_msg:
-                # Find the end of tool results sequence
-                j = i + 1
-                while (
-                    j < len(input_messages)
-                    and input_messages[j].get("role") == tool_call_role
-                ):
-                    j += 1
-
-                # Check if sequence is complete (followed by assistant message)
-                if (
-                    j < len(input_messages)
-                    and input_messages[j].get("role") == "assistant"
-                ):
-                    # Valid sequence: include the tool caller
-                    result.append(current_msg)
-                    i += 1
-                else:
-                    # Incomplete sequence: skip entire cycle
-                    if self.logger.isEnabledFor(logging.INFO):
-                        self.logger.info(
-                            f"[_cleanup_input_messages] Skipping incomplete cycle [{i}:{j - 1}]"
-                        )
-                    i = j
-                continue
-
-            # Regular messages (user, assistant without tool_calls)
-            result.append(current_msg)
-            i += 1
-
-        if self.logger.isEnabledFor(logging.INFO):
-            self.logger.info(
-                f"[_cleanup_input_messages] Retained {len(result)} messages"
-            )
-
-        return result
-
     def _get_elapsed_time(self) -> float:
         """
         Get elapsed time in milliseconds from the first ask_model call.
@@ -376,7 +289,6 @@ class GeminiEventHandler(AIAgentEventHandler):
 
             # Clean up input messages to remove broken tool sequences (performance optimization)
             cleanup_start = pendulum.now("UTC")
-            cleaned_messages = self._cleanup_input_messages(input_messages)
             cleanup_end = pendulum.now("UTC")
             cleanup_time = (cleanup_end - cleanup_start).total_seconds() * 1000
 
@@ -384,7 +296,7 @@ class GeminiEventHandler(AIAgentEventHandler):
             # Optimized UUID generation - use .hex instead of str() conversion
             run_id = f"run-gemini-{self.model}-{timestamp}-{uuid.uuid4().hex[:8]}"
 
-            _input_messages = self._process_input_messages(cleaned_messages)
+            _input_messages = self._process_input_messages(input_messages)
 
             # Process and append any input files to the last user message
             if input_files and _input_messages and _input_messages[-1].role == "user":
