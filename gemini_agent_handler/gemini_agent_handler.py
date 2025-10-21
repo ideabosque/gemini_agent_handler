@@ -184,7 +184,7 @@ class GeminiEventHandler(AIAgentEventHandler):
         """
         self._global_start_time = None
         if self.logger.isEnabledFor(logging.DEBUG):
-            self.logger.debug(f"[TIMELINE] Timeline reset for new run")
+            self.logger.debug("[TIMELINE] Timeline reset for new run")
 
     def invoke_model(self, **kwargs: Dict[str, Any]) -> Any:
         """
@@ -239,7 +239,7 @@ class GeminiEventHandler(AIAgentEventHandler):
         input_messages: List[Dict[str, Any]],
         queue: Queue = None,
         stream_event: threading.Event = None,
-        input_files: List[str, Any] = [],
+        input_files: List[str] = [],
         model_setting: Dict[str, Any] = None,
     ) -> Optional[str]:
         """
@@ -274,7 +274,7 @@ class GeminiEventHandler(AIAgentEventHandler):
             self._global_start_time = ask_model_start
             if self.logger.isEnabledFor(logging.DEBUG):
                 self.logger.debug(
-                    f"[TIMELINE] T+0ms: Run started - First ask_model call"
+                    "[TIMELINE] T+0ms: Run started - First ask_model call"
                 )
         else:
             if self.logger.isEnabledFor(logging.DEBUG):
@@ -393,7 +393,7 @@ class GeminiEventHandler(AIAgentEventHandler):
                         parts=parts,
                     )
                 )
-            except:
+            except Exception:
                 _input_messages.append(
                     types.Content(
                         role="user" if msg["role"] == "user" else "model",
@@ -406,7 +406,7 @@ class GeminiEventHandler(AIAgentEventHandler):
         self,
         tool_call: Any,
         input_messages: List[Dict[str, Any]],
-    ) -> None:
+    ) -> List[Dict[str, Any]]:
         """
         Processes and executes function calls from the model response.
 
