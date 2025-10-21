@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.8"
 license = "MIT"
 authors = [
-    {name = "Idea Bosque", email = "ideabosque@gmail.com"}
+    {name = "IdeaBosque", email = "ideabosque@gmail.com"}
 ]
 keywords = [
     "gemini",
