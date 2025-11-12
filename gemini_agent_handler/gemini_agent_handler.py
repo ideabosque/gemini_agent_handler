@@ -120,36 +120,39 @@ class GeminiEventHandler(AIAgentEventHandler):
 
         self.model = self.agent["configuration"].get("model")
 
+        tools = []
+
+        # Always add function declarations if they exist (excluding google_search and code_execution)
+        sanitized_tools = [
+            self._sanitize_tool_schema(tool)
+            for tool in self.agent["configuration"].get("tools", [])
+            if tool["name"] not in ["code_execution", "google_search"]
+        ]
+
+        if sanitized_tools:
+            tools.append(types.Tool(function_declarations=sanitized_tools))
+
+        # Add Google Search if configured
         if any(
             tool["name"] == "google_search"
             for tool in self.agent["configuration"].get("tools", [])
         ):
-            tools = [types.Tool(google_search=types.GoogleSearch())]
-        else:
-            # Initialize tools list with function declarations, excluding code execution
-            # Sanitize tools to remove incompatible JSON Schema fields
-            sanitized_tools = [
-                self._sanitize_tool_schema(tool)
-                for tool in self.agent["configuration"].get("tools", [])
-                if tool["name"] != "code_execution"  # Filter out code execution tool
-            ]
+            tools.append(types.Tool(google_search=types.GoogleSearch()))
 
-            tools = [types.Tool(function_declarations=sanitized_tools)]
-
-            # Add code execution tool if configured
-            if any(
-                tool["name"] == "code_execution"
-                for tool in self.agent["configuration"].get("tools", [])
-            ):
-                # Append code execution capability as a separate tool
-                tools.append(types.Tool(code_execution=types.ToolCodeExecution))
+        # Add code execution if configured
+        if any(
+            tool["name"] == "code_execution"
+            for tool in self.agent["configuration"].get("tools", [])
+        ):
+            tools.append(types.Tool(code_execution=types.ToolCodeExecution))
 
         # Convert Decimal to float once during initialization (performance optimization)
+        # Exclude 'reasoning' from model_setting as it's not a Gemini API parameter
         self.model_setting = dict(
             {
                 k: float(v) if isinstance(v, Decimal) else v
                 for k, v in self.agent["configuration"].items()
-                if k not in ["api_key", "tools", "model", "text"]
+                if k not in ["api_key", "tools", "model", "text", "reasoning"]
             },
             **{
                 "system_instruction": self.agent["instructions"],
@@ -165,6 +168,21 @@ class GeminiEventHandler(AIAgentEventHandler):
             .get("format", {})
             .get("type", "text")
         )
+
+        # Validate reasoning configuration if present
+        if "reasoning" in self.agent["configuration"]:
+            if not isinstance(self.agent["configuration"]["reasoning"], dict):
+                if self.logger and self.logger.isEnabledFor(logging.WARNING):
+                    self.logger.warning(
+                        "Reasoning configuration should be a dictionary. "
+                        "Reasoning features may not work correctly."
+                    )
+            elif self.agent["configuration"]["reasoning"].get("enabled") is None:
+                if self.logger and self.logger.isEnabledFor(logging.WARNING):
+                    self.logger.warning(
+                        "Reasoning is not explicitly enabled in configuration. "
+                        "Reasoning events will be skipped during streaming."
+                    )
 
         # Enable/disable timeline logging (default: disabled)
         self.enable_timeline_log = setting.get("enable_timeline_log", False)
@@ -207,7 +225,27 @@ class GeminiEventHandler(AIAgentEventHandler):
         try:
             invoke_start = pendulum.now("UTC")
 
-            config = types.GenerateContentConfig(**self.model_setting)
+            # Build config with reasoning/thinking if enabled
+            config_params = dict(self.model_setting)
+
+            # Add thinking configuration if reasoning is enabled
+            reasoning_config = self.agent["configuration"].get("reasoning", {})
+            if isinstance(reasoning_config, dict) and reasoning_config.get("enabled"):
+                thinking_budget = reasoning_config.get(
+                    "thinking_budget", -1
+                )  # -1 = dynamic
+                include_thoughts = reasoning_config.get(
+                    "include_thoughts", True
+                )  # True by default to show reasoning
+                config_params["thinking_config"] = types.ThinkingConfig(
+                    thinking_budget=thinking_budget, include_thoughts=include_thoughts
+                )
+                if self.logger.isEnabledFor(logging.DEBUG):
+                    self.logger.debug(
+                        f"[invoke_model] Reasoning enabled with thinking_budget={thinking_budget}, include_thoughts={include_thoughts}"
+                    )
+
+            config = types.GenerateContentConfig(**config_params)
 
             if kwargs.get("stream"):
                 result = self.client.models.generate_content_stream(
@@ -275,6 +313,12 @@ class GeminiEventHandler(AIAgentEventHandler):
         # Recursive calls will use the same start time for the entire run timeline
         if is_top_level:
             self._global_start_time = ask_model_start
+
+            # Reset reasoning_summary for new conversation turn
+            # Recursive calls (function call loops) will continue accumulating
+            if "reasoning_summary" in self.final_output:
+                del self.final_output["reasoning_summary"]
+
             if self.enable_timeline_log and self.logger.isEnabledFor(logging.INFO):
                 self.logger.info("[TIMELINE] T+0ms: Run started - First ask_model call")
         else:
@@ -736,6 +780,31 @@ class GeminiEventHandler(AIAgentEventHandler):
             for part in candidate.content.parts
         )
 
+        # Extract and store reasoning/thinking if present
+        reasoning_parts = []
+        for part in candidate.content.parts:
+            if hasattr(part, "thought") and part.thought:
+                try:
+                    reasoning_parts.append(part.text)
+                    if self.logger.isEnabledFor(logging.DEBUG):
+                        self.logger.debug(
+                            f"[handle_response] Captured reasoning: {part.text[:100]}..."
+                        )
+                except Exception as e:
+                    if self.logger.isEnabledFor(logging.ERROR):
+                        self.logger.error(f"Failed to process reasoning: {e}")
+
+        # Store reasoning summary if present
+        if reasoning_parts:
+            reasoning_text = "\n".join(reasoning_parts)
+            if self.final_output.get("reasoning_summary"):
+                # Accumulate reasoning from multiple rounds (e.g., function calls)
+                self.final_output["reasoning_summary"] = (
+                    self.final_output["reasoning_summary"] + "\n" + reasoning_text
+                )
+            else:
+                self.final_output["reasoning_summary"] = reasoning_text
+
         # Scenario 1: Handle function calls
         if has_function_call:
             for part in candidate.content.parts:
@@ -773,11 +842,13 @@ class GeminiEventHandler(AIAgentEventHandler):
         timestamp = pendulum.now("UTC").int_timestamp
         # Optimized UUID generation
         message_id = f"msg-gemini-{self.model}-{timestamp}-{uuid.uuid4().hex[:8]}"
-        self.final_output = {
-            "message_id": message_id,
-            "role": "assistant",
-            "content": response.text,
-        }
+        self.final_output.update(
+            {
+                "message_id": message_id,
+                "role": "assistant",
+                "content": response.text,
+            }
+        )
 
     def handle_stream(
         self,
@@ -813,6 +884,13 @@ class GeminiEventHandler(AIAgentEventHandler):
         accumulated_partial_text = ""
         received_any_content = False
 
+        # Reasoning tracking variables (matching OpenAI and Ollama handler patterns)
+        reasoning_no = 0
+        reasoning_index = 0
+        accumulated_reasoning_parts = []
+        accumulated_partial_reasoning_text = ""
+        reasoning_started = False
+
         # Use cached output format type (performance optimization)
         output_format = self.output_format_type
         index = 0
@@ -833,25 +911,123 @@ class GeminiEventHandler(AIAgentEventHandler):
             for chunk in response_stream:
                 candidate = chunk.candidates[0]
 
-                # Detect function calls
+                # Process each part in the candidate
+                if candidate.content and candidate.content.parts:
+                    for part in candidate.content.parts:
+                        # Check if this is a reasoning/thought part
+                        if hasattr(part, "thought") and part.thought:
+                            # Start reasoning block if not started
+                            if not reasoning_started:
+                                reasoning_started = True
+                                self.send_data_to_stream(
+                                    index=reasoning_index,
+                                    data_format=output_format,
+                                    chunk_delta=f"<ReasoningStart Id={reasoning_no}/>",
+                                    suffix=f"rs#{reasoning_no}",
+                                )
+                                reasoning_index += 1
+
+                                if (
+                                    self.enable_timeline_log
+                                    and self.logger.isEnabledFor(logging.INFO)
+                                ):
+                                    elapsed = self._get_elapsed_time()
+                                    self.logger.info(
+                                        f"[TIMELINE] T+{elapsed:.2f}ms: Reasoning started"
+                                    )
+
+                            # Skip empty thought text
+                            if not part.text:
+                                continue
+
+                            received_any_content = True
+                            reasoning_text = part.text
+
+                            # Accumulate reasoning text
+                            print(reasoning_text, end="", flush=True)
+                            accumulated_reasoning_parts.append(reasoning_text)
+                            accumulated_partial_reasoning_text += reasoning_text
+
+                            # Process and send reasoning text
+                            reasoning_index, accumulated_partial_reasoning_text = (
+                                self.process_text_content(
+                                    reasoning_index,
+                                    accumulated_partial_reasoning_text,
+                                    output_format,
+                                    suffix=f"rs#{reasoning_no}",
+                                )
+                            )
+
+                        # Detect function calls
+                        elif hasattr(part, "function_call") and part.function_call:
+                            tool_call = part.function_call
+                            received_any_content = True
+
+                # Check if reasoning block has ended (regular content starts arriving)
                 if (
-                    candidate.content
-                    and candidate.content.parts
-                    and hasattr(candidate.content.parts[0], "function_call")
+                    reasoning_started
+                    and chunk.text
+                    and not (
+                        candidate.content
+                        and candidate.content.parts
+                        and any(
+                            hasattr(p, "thought") and p.thought
+                            for p in candidate.content.parts
+                        )
+                    )
                 ):
-                    chunk_function_call = candidate.content.parts[0].function_call
-                    if chunk_function_call:
-                        tool_call = chunk_function_call
-                        received_any_content = True
+                    # End reasoning block
+                    if len(accumulated_partial_reasoning_text) > 0:
+                        self.send_data_to_stream(
+                            index=reasoning_index,
+                            data_format=output_format,
+                            chunk_delta=accumulated_partial_reasoning_text,
+                            suffix=f"rs#{reasoning_no}",
+                        )
+                        accumulated_partial_reasoning_text = ""
+                        reasoning_index += 1
+
+                    self.send_data_to_stream(
+                        index=reasoning_index,
+                        data_format=output_format,
+                        chunk_delta=f"<ReasoningEnd Id={reasoning_no}/>",
+                        is_message_end=True,
+                        suffix=f"rs#{reasoning_no}",
+                    )
+                    reasoning_no += 1
+                    reasoning_started = False
+
+                    if self.enable_timeline_log and self.logger.isEnabledFor(
+                        logging.INFO
+                    ):
+                        elapsed = self._get_elapsed_time()
+                        self.logger.info(
+                            f"[TIMELINE] T+{elapsed:.2f}ms: Reasoning ended"
+                        )
 
                 # Skip empty text chunks
                 if not chunk.text:
+                    continue
+
+                # Skip thought chunks (already processed above)
+                if (
+                    candidate.content
+                    and candidate.content.parts
+                    and any(
+                        hasattr(p, "thought") and p.thought
+                        for p in candidate.content.parts
+                    )
+                ):
                     continue
 
                 received_any_content = True
 
                 # Start message on first text chunk
                 if not message_started:
+                    # Sync index with reasoning_index when starting content after reasoning
+                    if index == 0 and reasoning_index > 0:
+                        index = reasoning_index + 1
+
                     self.send_data_to_stream(index=index, data_format=output_format)
                     index += 1
                     message_started = True
@@ -890,6 +1066,24 @@ class GeminiEventHandler(AIAgentEventHandler):
 
             # Build final accumulated text from parts (performance optimization)
             final_accumulated_text = "".join(accumulated_text_parts)
+
+            # Store accumulated reasoning summary if present
+            if accumulated_reasoning_parts:
+                final_reasoning_text = "".join(accumulated_reasoning_parts)
+                if self.final_output.get("reasoning_summary"):
+                    # Accumulate reasoning from multiple rounds (e.g., function calls)
+                    self.final_output["reasoning_summary"] = (
+                        self.final_output["reasoning_summary"]
+                        + "\n"
+                        + final_reasoning_text
+                    )
+                else:
+                    self.final_output["reasoning_summary"] = final_reasoning_text
+
+                if self.logger.isEnabledFor(logging.DEBUG):
+                    self.logger.debug(
+                        f"[handle_stream] Stored reasoning summary: {final_reasoning_text[:100]}..."
+                    )
 
             # Scenario 1: Handle function call
             if tool_call:
