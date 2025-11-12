@@ -16,10 +16,9 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 import pendulum
+from ai_agent_handler import AIAgentEventHandler
 from google import genai
 from google.genai import types
-
-from ai_agent_handler import AIAgentEventHandler
 from silvaengine_utility import Utility
 
 
@@ -1140,11 +1139,12 @@ class GeminiEventHandler(AIAgentEventHandler):
                 merged_parts.append(final_accumulated_text)
                 final_accumulated_text = "".join(merged_parts)
 
-            self.final_output = {
+            # Use update() instead of assignment to preserve reasoning_summary
+            self.final_output.update({
                 "message_id": message_id,
                 "role": "assistant",
                 "content": final_accumulated_text,
-            }
+            })
 
         except Exception as e:
             if self.logger.isEnabledFor(logging.ERROR):
@@ -1153,11 +1153,12 @@ class GeminiEventHandler(AIAgentEventHandler):
             final_text = (
                 "".join(accumulated_text_parts) if accumulated_text_parts else ""
             )
-            self.final_output = {
+            # Use update() instead of assignment to preserve reasoning_summary
+            self.final_output.update({
                 "message_id": message_id,
                 "role": "assistant",
                 "content": final_text,
-            }
+            })
             raise
         finally:
             if stream_event:
