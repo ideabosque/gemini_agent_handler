@@ -16,9 +16,10 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 import pendulum
-from ai_agent_handler import AIAgentEventHandler
 from google import genai
 from google.genai import types
+
+from ai_agent_handler import AIAgentEventHandler
 from silvaengine_utility import Utility
 
 
@@ -990,7 +991,6 @@ class GeminiEventHandler(AIAgentEventHandler):
                         index=reasoning_index,
                         data_format=output_format,
                         chunk_delta=f"<ReasoningEnd Id={reasoning_no}/>",
-                        is_message_end=True,
                         suffix=f"rs#{reasoning_no}",
                     )
                     reasoning_no += 1
@@ -1140,11 +1140,13 @@ class GeminiEventHandler(AIAgentEventHandler):
                 final_accumulated_text = "".join(merged_parts)
 
             # Use update() instead of assignment to preserve reasoning_summary
-            self.final_output.update({
-                "message_id": message_id,
-                "role": "assistant",
-                "content": final_accumulated_text,
-            })
+            self.final_output.update(
+                {
+                    "message_id": message_id,
+                    "role": "assistant",
+                    "content": final_accumulated_text,
+                }
+            )
 
         except Exception as e:
             if self.logger.isEnabledFor(logging.ERROR):
@@ -1154,11 +1156,13 @@ class GeminiEventHandler(AIAgentEventHandler):
                 "".join(accumulated_text_parts) if accumulated_text_parts else ""
             )
             # Use update() instead of assignment to preserve reasoning_summary
-            self.final_output.update({
-                "message_id": message_id,
-                "role": "assistant",
-                "content": final_text,
-            })
+            self.final_output.update(
+                {
+                    "message_id": message_id,
+                    "role": "assistant",
+                    "content": final_text,
+                }
+            )
             raise
         finally:
             if stream_event:
