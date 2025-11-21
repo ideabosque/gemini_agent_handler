@@ -201,6 +201,37 @@ agent_config = {
 }
 ```
 
+### With Reasoning/Thinking (Gemini 3 vs 2.5)
+```python
+# Gemini 3 (uses thinking_level)
+agent_config = {
+    "configuration": {
+        "model": "gemini-3-pro-preview",
+        "api_key": "your-api-key",
+        "temperature": 0,
+        "reasoning": {
+            "enabled": True,
+            "thinking_level": "low",   # or "high"; preferred for Gemini 3
+            "include_thoughts": True,
+        },
+    }
+}
+
+# Gemini 2.5 (uses thinking_budget)
+agent_config = {
+    "configuration": {
+        "model": "gemini-2.5-pro",
+        "api_key": "your-api-key",
+        "temperature": 0,
+        "reasoning": {
+            "enabled": True,
+            "thinking_budget": 1024,   # -1 = dynamic, 0 = disable (where allowed)
+            "include_thoughts": True,
+        },
+    }
+}
+```
+
 ---
 
 ## 🔄 Retry Logic

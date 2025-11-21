@@ -16,10 +16,9 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 import pendulum
+from ai_agent_handler import AIAgentEventHandler
 from google import genai
 from google.genai import types
-
-from ai_agent_handler import AIAgentEventHandler
 from silvaengine_utility import Utility
 
 
@@ -231,19 +230,98 @@ class GeminiEventHandler(AIAgentEventHandler):
             # Add thinking configuration if reasoning is enabled
             reasoning_config = self.agent["configuration"].get("reasoning", {})
             if isinstance(reasoning_config, dict) and reasoning_config.get("enabled"):
-                thinking_budget = reasoning_config.get(
-                    "thinking_budget", -1
-                )  # -1 = dynamic
-                include_thoughts = reasoning_config.get(
-                    "include_thoughts", True
-                )  # True by default to show reasoning
-                config_params["thinking_config"] = types.ThinkingConfig(
-                    thinking_budget=thinking_budget, include_thoughts=include_thoughts
+                include_thoughts = reasoning_config.get("include_thoughts", True)
+                model_name = (self.model or "").lower()
+                thinking_kwargs = {"include_thoughts": include_thoughts}
+
+                # Prefer thinking_level for Gemini 3 models; use thinking_budget otherwise.
+                if "gemini-3" in model_name:
+                    thinking_level = reasoning_config.get("thinking_level")
+                    if thinking_level:
+                        thinking_kwargs["thinking_level"] = thinking_level
+                    elif "thinking_budget" in reasoning_config:
+                        # Backwards compatibility: allow budget on Gemini 3, but log for awareness.
+                        thinking_kwargs["thinking_budget"] = reasoning_config.get(
+                            "thinking_budget", -1
+                        )
+                        if self.logger.isEnabledFor(logging.DEBUG):
+                            self.logger.debug(
+                                "[invoke_model] Using thinking_budget on Gemini 3 model; "
+                                "consider providing thinking_level instead."
+                            )
+                    if self.logger.isEnabledFor(logging.DEBUG):
+                        self.logger.debug(
+                            f"[invoke_model] Reasoning enabled for Gemini 3 with {thinking_kwargs}"
+                        )
+                else:
+                    thinking_budget = reasoning_config.get("thinking_budget", -1)
+                    thinking_kwargs["thinking_budget"] = thinking_budget
+                    # Allow thinking_level to pass through for other models if explicitly provided
+                    if "thinking_level" in reasoning_config:
+                        thinking_kwargs["thinking_level"] = reasoning_config.get(
+                            "thinking_level"
+                        )
+                    if self.logger.isEnabledFor(logging.DEBUG):
+                        self.logger.debug(
+                            f"[invoke_model] Reasoning enabled with {thinking_kwargs}"
+                        )
+
+                # Sanitize thinking config against SDK support (older google-genai may not support thinking_level)
+                supported_fields = set(
+                    getattr(types.ThinkingConfig, "model_fields", {}).keys()
+                    or getattr(types.ThinkingConfig, "__fields__", {}).keys()
                 )
-                if self.logger.isEnabledFor(logging.DEBUG):
-                    self.logger.debug(
-                        f"[invoke_model] Reasoning enabled with thinking_budget={thinking_budget}, include_thoughts={include_thoughts}"
-                    )
+                if supported_fields:
+                    alias_map = {"thinking_budget": "budget_tokens"}
+                    sanitized_kwargs = {}
+                    dropped_fields = []
+                    for key, value in thinking_kwargs.items():
+                        if value is None:
+                            continue
+                        target_key = key
+                        if key not in supported_fields and key in alias_map:
+                            if alias_map[key] in supported_fields:
+                                target_key = alias_map[key]
+                        if target_key in supported_fields:
+                            sanitized_kwargs[target_key] = value
+                        else:
+                            dropped_fields.append(key)
+
+                    if dropped_fields and self.logger.isEnabledFor(logging.WARNING):
+                        self.logger.warning(
+                            "[invoke_model] Dropping unsupported ThinkingConfig fields %s. "
+                            "Upgrade google-genai to enable them.",
+                            dropped_fields,
+                        )
+
+                    if sanitized_kwargs:
+                        config_params["thinking_config"] = types.ThinkingConfig(
+                            **sanitized_kwargs
+                        )
+                else:
+                    # Fallback: try building directly; if it fails, drop risky keys such as thinking_level
+                    try:
+                        config_params["thinking_config"] = types.ThinkingConfig(
+                            **thinking_kwargs
+                        )
+                    except Exception as err:
+                        if "thinking_level" in thinking_kwargs:
+                            fallback_kwargs = {
+                                k: v
+                                for k, v in thinking_kwargs.items()
+                                if k != "thinking_level"
+                            }
+                            if self.logger.isEnabledFor(logging.WARNING):
+                                self.logger.warning(
+                                    "[invoke_model] thinking_level not supported by SDK, "
+                                    "falling back without it: %s",
+                                    err,
+                                )
+                            config_params["thinking_config"] = types.ThinkingConfig(
+                                **fallback_kwargs
+                            )
+                        else:
+                            raise
 
             config = types.GenerateContentConfig(**config_params)
 
