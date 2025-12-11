@@ -1,0 +1,163 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gemini-agent-handler"
+version = "0.0.1"
+description = "Production-ready Gemini Agent Handler with automatic retry logic, schema sanitization, and MCP server support"
+readme = "README.md"
+requires-python = ">=3.8"
+license = "MIT"
+authors = [
+    {name = "IdeaBosque", email = "ideabosque@gmail.com"}
+]
+keywords = [
+    "gemini",
+    "google-ai",
+    "ai-agent",
+    "llm",
+    "chatbot",
+    "mcp",
+    "streaming",
+    "vertex-ai"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Internet :: WWW/HTTP :: Dynamic Content",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "silvaengine-utility",
+    "ai-agent-handler",
+    "google-genai",
+    "pendulum",
+    "httpx[http2]",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-mock>=3.10.0",
+    "black>=23.0.0",
+    "flake8>=6.0.0",
+    "mypy>=1.0.0",
+    "python-dotenv>=1.0.0",
+]
+
+test = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-mock>=3.10.0",
+    "python-dotenv>=1.0.0",
+]
+
+vertex = [
+    "google-cloud-aiplatform",
+]
+
+[project.urls]
+Homepage = "https://github.com/ideabosque/gemini_agent_handler"
+Repository = "https://github.com/ideabosque/gemini_agent_handler"
+Documentation = "https://github.com/ideabosque/gemini_agent_handler#readme"
+Issues = "https://github.com/ideabosque/gemini_agent_handler/issues"
+
+[tool.setuptools]
+packages = ["gemini_agent_handler"]
+
+[tool.setuptools.package-data]
+gemini_agent_handler = ["py.typed", "tests/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["gemini_agent_handler/tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+addopts = [
+    "--verbose",
+    "--strict-markers",
+    "--tb=short",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+]
+
+[tool.black]
+line-length = 88
+target-version = ["py38", "py39", "py310", "py311", "py312"]
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | build
+  | dist
+)/
+'''
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+strict_equality = true
+
+[[tool.mypy.overrides]]
+module = [
+    "google.genai.*",
+    "silvaengine_utility.*",
+    "ai_agent_handler.*",
+]
+ignore_missing_imports = true
+
+[tool.coverage.run]
+source = ["gemini_agent_handler"]
+omit = [
+    "*/tests/*",
+    "*/test_*.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+]
+
+[tool.pyright]
+typeCheckingMode = "basic"
+reportCallIssue = "none"
+reportArgumentType = "none"
+reportAttributeAccessIssue = "none"
+reportOperatorIssue = "none"
+reportOptionalMemberAccess = "none"

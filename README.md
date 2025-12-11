@@ -1,8 +1,14 @@
 # 🧠 GeminiEventHandler
 
-The `GeminiEventHandler` is a concrete implementation of the ![`AIAgentEventHandler`](https://github.com/ideabosque/ai_agent_handler) base class designed to interface with Google Gemini models. It orchestrates message formatting, model invocation, tool integration, streaming, and threading within the AI agent execution pipeline.
+The `GeminiEventHandler` is a production-ready implementation of the [`AIAgentEventHandler`](https://github.com/ideabosque/ai_agent_handler) base class designed to interface with Google Gemini models. It provides robust message handling, model invocation, tool integration, streaming support, and automatic retry logic for reliable AI agent orchestration.
 
-This handler enables a **stateless, multi-turn AI orchestration** system built to support tools like `get_weather_forecast`.
+This handler enables a **stateless, multi-turn AI orchestration** system with support for:
+- ✅ Function calling (tools/MCP servers)
+- ✅ Streaming and non-streaming responses
+- ✅ Automatic retry on empty responses (max 5 retries)
+- ✅ Schema sanitization for MCP server compatibility
+- ✅ File upload support (images, documents, etc.)
+- ✅ Vertex AI and Google AI Studio support
 
 ---
 
@@ -18,242 +24,502 @@ AIAgentEventHandler
 
 ---
 
-## 📦 Module Features
+## 📦 Key Features
 
-### 🔧 Attributes
+### 🔧 Core Attributes
 
-* `client`: Gemini API client instance
-* `model_settings`: A dictionary containing Gemini model configuration (e.g., `model`, `temperature`, `tools`, etc.)
+* **`client`**: Gemini API client instance (supports both Vertex AI and Google AI)
+* **`model`**: Model name (e.g., `gemini-2.5-pro`, `gemini-2.0-flash-exp`)
+* **`model_setting`**: Configuration dict containing `temperature`, `tools`, `system_instruction`, etc.
+* **`final_output`**: Final response with `message_id`, `role`, and `content`
 
-### 📞 Core Method: `invoke_model`
+### 🛡️ Reliability Features
+
+* **Schema Sanitization**: Automatically removes incompatible JSON Schema fields from MCP server tool definitions
+* **Retry Logic**: Automatically retries empty responses up to 5 times before failing
+* **Error Handling**: Comprehensive exception handling with proper cleanup
+* **Content Validation**: Ensures `final_output` always has valid `message_id` and non-empty `content`
+
+### 📞 Core Methods
+
+#### `ask_model(input_messages, queue=None, stream_event=None, input_files=[], model_setting=None)`
+
+Main entry point for making requests to Gemini.
+
+**Args:**
+- `input_messages`: List of conversation messages
+- `queue`: Optional queue for streaming events
+- `stream_event`: Optional threading.Event to signal completion
+- `input_files`: Optional list of files to include
+- `model_setting`: Optional settings to override defaults
+
+**Returns:**
+- `run_id` (non-streaming) or `None` (streaming)
+
+**Features:**
+- Automatic message processing and conversion
+- File upload support
+- Performance monitoring
+- Streaming and non-streaming modes
+
+#### `handle_response(response, input_messages, retry_count=0)`
+
+Processes non-streaming responses with automatic retry logic.
+
+**Scenarios:**
+1. **Function call detected** → Execute function and recurse
+2. **Empty response** → Retry up to 5 times
+3. **Valid response** → Set `final_output`
+
+#### `handle_stream(response_stream, input_messages, stream_event, retry_count=0)`
+
+Processes streaming responses with real-time updates.
+
+**Features:**
+- Incremental text accumulation
+- JSON/text format support
+- Function call detection during streaming
+- Automatic retry on empty streams
+- WebSocket streaming support
+
+#### `_sanitize_tool_schema(tool)`
+
+Removes JSON Schema fields incompatible with Gemini API.
+
+**Removes:**
+- `additional_properties` / `additionalProperties` (all types)
+- `required` field from non-object types (arrays, strings, etc.)
+
+**Keeps:**
+- `required` field for object types
+
+This ensures MCP server tool definitions work correctly with Gemini.
+
+---
+
+## 🔌 Initialization
+
+### Google AI Studio (API Key)
 
 ```python
-def invoke_model(self, **kwargs: Dict[str, Any]) -> Any:
-    """
-    Invokes the Gemini model with the provided configuration.
+from gemini_agent_handler import GeminiEventHandler
 
-    Args:
-        kwargs: Dictionary containing:
-            - input: Messages to send to the model
-            - stream: Boolean indicating if streaming response is desired
+handler = GeminiEventHandler(
+    logger=logger,
+    agent=agent_config,
+    endpoint_id="your-endpoint-id"
+)
+```
 
-    Returns:
-        Either a streaming or non-streaming model response
+### Vertex AI (GCP)
 
-    Raises:
-        Exception: If model invocation fails
-    """
-    try:
-        config = types.GenerateContentConfig(**self.model_setting)
+```python
+from gemini_agent_handler import GeminiEventHandler
 
-        if kwargs.get("stream"):
-            return self.client.models.generate_content_stream(
-                model=self.model,
-                contents=kwargs["input"],
-                config=config,
-            )
-
-        return self.client.models.generate_content(
-            model=self.model,
-            contents=kwargs["input"],
-            config=config,
-        )
-    except Exception as e:
-        self.logger.error(f"Error invoking model: {str(e)}")
-        raise Exception(f"Failed to invoke model: {str(e)}")
+handler = GeminiEventHandler(
+    logger=logger,
+    agent=agent_config,
+    project="your-gcp-project",
+    location="us-central1"
+)
 ```
 
 ---
 
-## 📘 Sample Configuration (Gemini)
+## 📘 Agent Configuration
 
-```json
-{
-  "endpoint_id": "google",
-  "agent_name": "Weather Assistant (Gemini)",
-  "model": "gemini-2.5-pro-preview-03-25",
-  "temperature": 0,
-  "tools": [
-    {
-      "type": "function",
-      "name": "get_weather_forecast",
-      "description": "Get the weather forecast for a given city and date",
-      "strict": true,
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "city": {
-            "type": "string",
-            "description": "The city to retrieve the forecast for."
-          },
-          "date": {
-            "type": "string",
-            "description": "The forecast date (YYYY-MM-DD)."
-          }
-        },
-        "required": ["city", "date"],
-        "additionalProperties": false
-      }
-    }
-  ],
-  "functions": {
-    "get_weather_forecast": {
-      "class_name": "WeatherForecastFunction",
-      "module_name": "weather_funct",
-      "configuration": {}
-    }
-  },
-  "function_configuration": {
-    "weather_provider": "open-meteo",
-    "region_name": "${region_name}",
-    "aws_access_key_id": "${aws_access_key_id}",
-    "aws_secret_access_key": "${aws_secret_access_key}"
-  },
-  "instructions": "You are a Gemini-based AI Assistant responsible for providing accurate weather information using the `get_weather_forecast` function. Analyze user input to extract city and date information, and call the tool accordingly. Always clarify ambiguous input and offer detailed yet concise responses.",
-  "num_of_messages": 30,
-  "tool_call_role": "assistant",
-  "api_key": "${gemini_api_key}"
+### Basic Configuration
+
+```python
+agent_config = {
+    "instructions": "You are a helpful AI assistant...",
+    "llm": {"llm_name": "gemini"},
+    "configuration": {
+        "model": "gemini-2.5-pro",
+        "api_key": "your-api-key",  # Or use Vertex AI with project/location
+        "temperature": 0,
+        "tools": []  # Tool definitions (auto-sanitized)
+    },
+    "num_of_messages": 30,
+    "tool_call_role": "assistant"
 }
 ```
+
+### With MCP Servers
+
+```python
+agent_config = {
+    "instructions": "You are a shopping assistant...",
+    "llm": {"llm_name": "gemini"},
+    "mcp_servers": [
+        {
+            "name": "shopify_mcp_server",
+            "setting": {
+                "base_url": "https://your-store.myshopify.com/api/mcp",
+                "headers": {"Content-Type": "application/json"}
+            }
+        }
+    ],
+    "configuration": {
+        "model": "gemini-2.5-pro",
+        "api_key": "your-api-key",
+        "temperature": 0,
+        "tools": []  # Tools auto-populated from MCP servers
+    },
+    "num_of_messages": 30,
+    "tool_call_role": "assistant"
+}
+```
+
+**Note:** Tools from MCP servers are automatically sanitized to remove:
+- `additional_properties` / `additionalProperties`
+- `required` fields from non-object types
+
+This ensures compatibility with Gemini's schema validation.
+
+### With Google Search
+
+```python
+agent_config = {
+    "configuration": {
+        "model": "gemini-2.5-pro",
+        "api_key": "your-api-key",
+        "tools": [{"name": "google_search"}]
+    }
+}
+```
+
+### With Code Execution
+
+```python
+agent_config = {
+    "configuration": {
+        "model": "gemini-2.5-pro",
+        "api_key": "your-api-key",
+        "tools": [{"name": "code_execution"}]
+    }
+}
+```
+
+### With Reasoning/Thinking (Gemini 3 vs 2.5)
+```python
+# Gemini 3 (uses thinking_level)
+agent_config = {
+    "configuration": {
+        "model": "gemini-3-pro-preview",
+        "api_key": "your-api-key",
+        "temperature": 0,
+        "reasoning": {
+            "enabled": True,
+            "thinking_level": "low",   # or "high"; preferred for Gemini 3
+            "include_thoughts": True,
+        },
+    }
+}
+
+# Gemini 2.5 (uses thinking_budget)
+agent_config = {
+    "configuration": {
+        "model": "gemini-2.5-pro",
+        "api_key": "your-api-key",
+        "temperature": 0,
+        "reasoning": {
+            "enabled": True,
+            "thinking_budget": 1024,   # -1 = dynamic, 0 = disable (where allowed)
+            "include_thoughts": True,
+        },
+    }
+}
+```
+
+---
+
+## 🔄 Retry Logic
+
+The handler automatically retries empty responses up to 5 times:
+
+```python
+# Automatic retry happens internally
+handler.ask_model(input_messages)
+
+# Logs on retry:
+# "Received empty response from model, retrying (attempt 1/5)..."
+# "Received empty response from model, retrying (attempt 2/5)..."
+# ...
+
+# After 5 retries:
+# Exception: Maximum retry limit (5) exceeded for empty responses
+```
+
+**Retry scenarios:**
+- ✅ Empty text response (no content)
+- ✅ Whitespace-only response
+- ✅ None response
+- ✅ Empty streaming response
+
+**No retry needed:**
+- ✅ Function calls (handled normally)
+- ✅ Valid text responses
 
 ---
 
 ## 📎 Gemini-Specific Notes
 
-* Gemini API uses `generate_content` (non-stream) and `generate_content_stream` (streaming).
-* Use `system_instruction` instead of `instructions`.
-* Streaming output is handled via a server-side generator.
+* **API Modes**: Supports both `generate_content` (non-stream) and `generate_content_stream` (streaming)
+* **System Instructions**: Uses `system_instruction` field (automatically set from `instructions`)
+* **Tool Formats**: Supports function declarations, Google Search, and code execution
+* **File Support**: Upload images, PDFs, documents via `insert_file()`
+* **Vertex AI**: Set `project` and `location` instead of `api_key`
+* **Streaming**: Real-time chunk processing with WebSocket support
 
 ---
-## 💬 Full-Scale Chatbot Scripts
+## 💬 Usage Examples
 
-### 🔁 Non-Streaming Chatbot Script
-
-```python
-import logging
-import os
-import sys
-
-import pendulum
-from dotenv import load_dotenv
-from ai_agent_handler import AIAgentEventHandler
-from gemini_agent_handler import GeminiEventHandler
-
-logging.basicConfig(
-    stream=sys.stdout,
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-logger = logging.getLogger()
-
-load_dotenv()
-setting = {
-    "region_name": os.getenv("region_name"),
-    "aws_access_key_id": os.getenv("aws_access_key_id"),
-    "aws_secret_access_key": os.getenv("aws_secret_access_key"),
-    "funct_bucket_name": os.getenv("funct_bucket_name"),
-    "funct_zip_path": os.getenv("funct_zip_path"),
-    "funct_extract_path": os.getenv("funct_extract_path"),
-    "connection_id": os.getenv("connection_id"),
-    "endpoint_id": os.getenv("endpoint_id"),
-    "test_mode": os.getenv("test_mode"),
-}
-
-weather_agent = { ... }  # Configuration as defined above
-handler = GeminiEventHandler(logger=None, agent=weather_agent, **setting)
-handler.short_term_memory = []
-
-def get_input_messages(messages, num_of_messages):
-    return [msg["message"] for msg in sorted(messages, key=lambda x: x["created_at"], reverse=True)][:num_of_messages][::-1]
-
-while True:
-    user_input = input("User: ")
-    if user_input.strip().lower() in ["exit", "quit"]:
-        print("Chatbot: Goodbye!")
-        break
-
-    message = {"role": "user", "content": user_input}
-    handler.short_term_memory.append({"message": message, "created_at": pendulum.now("UTC")})
-    messages = get_input_messages(handler.short_term_memory, weather_agent["num_of_messages"])
-    run_id = handler.ask_model(messages)
-
-    print("Chatbot:", handler.final_output["content"])
-    handler.short_term_memory.append({
-        "message": handler.final_output,
-        "created_at": pendulum.now("UTC")
-    })
-```
-
-### 🔁 Streaming Chatbot Script
+### Non-Streaming Request
 
 ```python
-import logging
-import os
-import sys
-
-import pendulum
-from dotenv import load_dotenv
-from ai_agent_handler import AIAgentEventHandler
 from gemini_agent_handler import GeminiEventHandler
+import logging
 
-logging.basicConfig(
-    stream=sys.stdout,
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-logger = logging.getLogger()
+logger = logging.getLogger(__name__)
+handler = GeminiEventHandler(logger, agent_config, endpoint_id="test")
 
-load_dotenv()
-setting = {
-    "region_name": os.getenv("region_name"),
-    "aws_access_key_id": os.getenv("aws_access_key_id"),
-    "aws_secret_access_key": os.getenv("aws_secret_access_key"),
-    "funct_bucket_name": os.getenv("funct_bucket_name"),
-    "funct_zip_path": os.getenv("funct_zip_path"),
-    "funct_extract_path": os.getenv("funct_extract_path"),
-    "connection_id": os.getenv("connection_id"),
-    "endpoint_id": os.getenv("endpoint_id"),
-    "test_mode": os.getenv("test_mode"),
-}
+# Simple request
+input_messages = [
+    {"role": "user", "content": "What is the weather in Tokyo?"}
+]
+run_id = handler.ask_model(input_messages)
 
-weather_agent = { ... }  # Configuration as defined above
-handler = GeminiEventHandler(logger=None, agent=weather_agent, **setting)
-handler.short_term_memory = []
-
-def get_input_messages(messages, num_of_messages):
-    return [msg["message"] for msg in sorted(messages, key=lambda x: x["created_at"], reverse=True)][:num_of_messages][::-1]
-
-while True:
-    user_input = input("User: ")
-    if user_input.strip().lower() in ["exit", "quit"]:
-        print("Chatbot: Goodbye!")
-        break
-
-    message = {"role": "user", "content": user_input}
-    handler.short_term_memory.append({"message": message, "created_at": pendulum.now("UTC")})
-    messages = get_input_messages(handler.short_term_memory, weather_agent["num_of_messages"])
-
-    stream_queue = Queue()
-    stream_event = threading.Event()
-    stream_thread = threading.Thread(
-        target=handler.ask_model,
-        args=[messages, stream_queue, stream_event],
-        daemon=True
-    )
-    stream_thread.start()
-
-    result = stream_queue.get()
-    if result["name"] == "run_id":
-        print("Run ID:", result["value"])
-
-    stream_event.wait()
-    print("Chatbot:", handler.final_output["content"])
-    handler.short_term_memory.append({
-        "message": handler.final_output,
-        "created_at": pendulum.now("UTC")
-    })
+# Access response
+print(handler.final_output)
+# {
+#   "message_id": "msg-gemini-gemini-2.5-pro-1234567890-abcd1234",
+#   "role": "assistant",
+#   "content": "I'll check the weather in Tokyo for you..."
+# }
 ```
+
+### Streaming Request
+
+```python
+import threading
+from queue import Queue
+
+queue = Queue()
+event = threading.Event()
+
+# Start streaming request
+thread = threading.Thread(
+    target=handler.ask_model,
+    args=[input_messages, queue, event],
+    daemon=True
+)
+thread.start()
+
+# Get run_id
+run_id = queue.get()["value"]
+
+# Wait for completion
+event.wait()
+print(handler.final_output["content"])
+```
+
+### With File Upload
+
+```python
+import base64
+
+# Read and encode file
+with open("document.pdf", "rb") as f:
+    encoded_content = base64.b64encode(f.read()).decode("utf-8")
+
+# Upload file
+input_files = [{
+    "filename": "document.pdf",
+    "encoded_content": encoded_content,
+    "mime_type": "application/pdf"
+}]
+
+# Send message with file
+input_messages = [
+    {"role": "user", "content": "Summarize this document"}
+]
+handler.ask_model(input_messages, input_files=input_files)
+```
+
+---
+
+## 🛠️ Troubleshooting
+
+### Schema Validation Errors
+
+**Problem:**
+```
+ValidationError: Extra inputs are not permitted [type=extra_forbidden]
+```
+
+**Solution:** Tools are auto-sanitized. If you see this error, ensure you're using the latest version.
+
+---
+
+### Empty Response Retry
+
+**Problem:**
+```
+Maximum retry limit (5) exceeded for empty responses
+```
+
+**Solutions:**
+1. Check your prompt/instructions aren't causing the model to refuse
+2. Verify your API key/credentials are valid
+3. Check if the model is overloaded (try different model)
+4. Review model settings (temperature, max_tokens, etc.)
+
+---
+
+### Function Call Loop
+
+**Problem:** Model keeps calling same function repeatedly
+
+**Solutions:**
+1. Ensure function returns meaningful data
+2. Check function description is clear
+3. Verify function response format is correct
+4. Review conversation history for loops
+
+---
+
+### MCP Server Tools Not Working
+
+**Problem:** Tools from MCP servers cause validation errors
+
+**Solution:** Schema sanitization is automatic. Check:
+1. MCP server returns valid JSON Schema
+2. Tool names don't conflict with built-in tools
+3. MCP server is accessible from handler
+
+---
+
+## 📊 Performance Monitoring
+
+The handler includes built-in performance monitoring via `@Utility.performance_monitor.monitor_operation`:
+
+```python
+# Logs automatically generated:
+# "Gemini: ask_model completed in 2.5s"
+# "Gemini: ask_model failed after 1.2s: <error>"
+```
+
+---
+
+## 🔒 Security Notes
+
+- **API Keys**: Never commit API keys to version control
+- **Function Execution**: Functions run in handler context - validate inputs
+- **File Uploads**: Validate file types and sizes before upload
+- **MCP Servers**: Only connect to trusted MCP servers
+
+---
+
+## 📦 Installation
+
+### From PyPI
+
+```bash
+pip install gemini-agent-handler
+```
+
+### With Optional Dependencies
+
+```bash
+# Development tools (black, mypy, pytest, etc.)
+pip install gemini-agent-handler[dev]
+
+# Testing tools
+pip install gemini-agent-handler[test]
+
+# Vertex AI support
+pip install gemini-agent-handler[vertex]
+
+# Multiple groups
+pip install gemini-agent-handler[dev,vertex]
+```
+
+### From Source
+
+```bash
+git clone https://github.com/ideabosque/gemini_agent_handler.git
+cd gemini_agent_handler
+pip install -e ".[dev]"
+```
+
+---
+
+## 🛠️ Development
+
+### Setup Development Environment
+
+```bash
+# Clone repository
+git clone https://github.com/ideabosque/gemini_agent_handler.git
+cd gemini_agent_handler
+
+# Install with development dependencies
+pip install -e ".[dev]"
+```
+
+### Run Tests
+
+```bash
+# Run all tests
+pytest
+
+# Run specific test file
+pytest gemini_agent_handler/tests/test_gemini_agent_handler.py
+
+# Run with coverage
+pytest --cov=gemini_agent_handler --cov-report=html
+```
+
+### Code Quality
+
+```bash
+# Format code
+black gemini_agent_handler/
+
+# Type checking
+mypy gemini_agent_handler/
+
+# Linting
+flake8 gemini_agent_handler/
+```
+
+### Build Package
+
+```bash
+# Install build tool
+pip install build
+
+# Build wheel and source distribution
+python -m build
+
+# Output: dist/gemini_agent_handler-0.0.1-py3-none-any.whl
+#         dist/gemini_agent_handler-0.0.1.tar.gz
+```
+
+---
+
+## 📚 Related Documentation
+
+- [AIAgentEventHandler Base Class](https://github.com/ideabosque/ai_agent_handler)
+- [Google Gemini API Documentation](https://ai.google.dev/docs)
+- [Vertex AI Documentation](https://cloud.google.com/vertex-ai/docs)
+- [MCP Protocol Specification](https://modelcontextprotocol.io)
+
+---
+
+## 📝 License
+
+See LICENSE file for details.
 
 ---
