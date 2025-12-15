@@ -20,7 +20,7 @@ from google import genai
 from google.genai import types
 
 from ai_agent_handler import AIAgentEventHandler
-from silvaengine_utility import Utility
+from silvaengine_utility.performance_monitor import performance_monitor
 from silvaengine_utility.serializer import Serializer
 
 
@@ -354,7 +354,7 @@ class GeminiEventHandler(AIAgentEventHandler):
                 self.logger.error(f"Error invoking model: {str(e)}")
             raise Exception(f"Failed to invoke model: {str(e)}")
 
-    @Utility.performance_monitor.monitor_operation(operation_name="Gemini")
+    @performance_monitor.monitor_operation(operation_name="Gemini")
     def ask_model(
         self,
         input_messages: List[Dict[str, Any]],
