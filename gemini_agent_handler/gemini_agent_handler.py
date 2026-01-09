@@ -997,13 +997,13 @@ class GeminiEventHandler(AIAgentEventHandler):
                             # Start reasoning block if not started
                             if not reasoning_started:
                                 reasoning_started = True
-                                self.send_data_to_stream(
-                                    index=reasoning_index,
-                                    data_format=output_format,
-                                    chunk_delta=f"<ReasoningStart Id={reasoning_no}/>",
-                                    suffix=f"rs#{reasoning_no}",
-                                )
-                                reasoning_index += 1
+                                # self.send_data_to_stream(
+                                #     index=reasoning_index,
+                                #     data_format=output_format,
+                                #     chunk_delta=f"<ReasoningStart Id={reasoning_no}/>",
+                                #     suffix=f"rs#{reasoning_no}",
+                                # )
+                                # reasoning_index += 1
 
                                 if (
                                     self.enable_timeline_log
@@ -1065,13 +1065,13 @@ class GeminiEventHandler(AIAgentEventHandler):
                         accumulated_partial_reasoning_text = ""
                         reasoning_index += 1
 
-                    self.send_data_to_stream(
-                        index=reasoning_index,
-                        data_format=output_format,
-                        chunk_delta=f"<ReasoningEnd Id={reasoning_no}/>",
-                        suffix=f"rs#{reasoning_no}",
-                    )
-                    reasoning_no += 1
+                    # self.send_data_to_stream(
+                    #     index=reasoning_index,
+                    #     data_format=output_format,
+                    #     chunk_delta=f"<ReasoningEnd Id={reasoning_no}/>",
+                    #     suffix=f"rs#{reasoning_no}",
+                    # )
+                    # reasoning_no += 1
                     reasoning_started = False
 
                     if self.enable_timeline_log and self.logger.isEnabledFor(
