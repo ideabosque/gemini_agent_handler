@@ -19,7 +19,7 @@ import pendulum
 from ai_agent_handler import AIAgentEventHandler
 from google import genai
 from google.genai import types
-from silvaengine_utility import Utility, performance_monitor
+from silvaengine_utility import Serializer, performance_monitor
 
 
 # ----------------------------
@@ -499,7 +499,7 @@ class GeminiEventHandler(AIAgentEventHandler):
         ):
             # Check if content can be loaded as JSON and convert if needed
             try:
-                contents = Utility.json_loads(msg["content"])
+                contents = Serializer.json_loads(msg["content"])
                 parts = []
                 for content in contents:
                     if content["type"] == "input_text":
@@ -604,7 +604,7 @@ class GeminiEventHandler(AIAgentEventHandler):
                     {
                         "message": {
                             "role": self.agent["tool_call_role"],
-                            "content": Utility.json_dumps(
+                            "content": Serializer.json_dumps(
                                 {
                                     "tool": {
                                         "tool_call_id": function_call_data["id"],
@@ -715,7 +715,7 @@ class GeminiEventHandler(AIAgentEventHandler):
 
         try:
             # Cache JSON serialization to avoid duplicate work (performance optimization)
-            arguments_json = Utility.json_dumps(arguments)
+            arguments_json = Serializer.json_dumps(arguments)
 
             self.invoke_async_funct(
                 "async_insert_update_tool_call",
@@ -744,7 +744,7 @@ class GeminiEventHandler(AIAgentEventHandler):
                 "async_insert_update_tool_call",
                 **{
                     "tool_call_id": function_call_data["id"],
-                    "content": Utility.json_dumps(function_output),
+                    "content": Serializer.json_dumps(function_output),
                     "status": "completed",
                 },
             )
@@ -754,7 +754,7 @@ class GeminiEventHandler(AIAgentEventHandler):
             log = traceback.format_exc()
             # Reuse cached JSON serialization (performance optimization)
             if "arguments_json" not in locals():
-                arguments_json = Utility.json_dumps(arguments)
+                arguments_json = Serializer.json_dumps(arguments)
             self.invoke_async_funct(
                 "async_insert_update_tool_call",
                 **{
@@ -789,7 +789,9 @@ class GeminiEventHandler(AIAgentEventHandler):
         function_response_part = types.Part.from_function_response(
             name=tool_call.name,
             response={
-                "result": Utility.json_normalize(function_output, parser_number=False)
+                "result": Serializer.json_normalize(
+                    function_output, parser_number=False
+                )
             },
         )
 
