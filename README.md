@@ -402,7 +402,7 @@ Maximum retry limit (5) exceeded for empty responses
 
 ## 📊 Performance Monitoring
 
-The handler includes built-in performance monitoring via `@Utility.performance_monitor.monitor_operation`:
+The handler includes built-in performance monitoring via `@performance_monitor.monitor_operation`:
 
 ```python
 # Logs automatically generated:
