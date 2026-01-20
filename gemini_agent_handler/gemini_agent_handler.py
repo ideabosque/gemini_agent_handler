@@ -16,10 +16,12 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 import pendulum
-from ai_agent_handler import AIAgentEventHandler
 from google import genai
 from google.genai import types
-from silvaengine_utility import Serializer, performance_monitor
+
+from ai_agent_handler import AIAgentEventHandler
+from silvaengine_utility.performance_monitor import performance_monitor
+from silvaengine_utility.serializer import Serializer
 
 
 # ----------------------------
@@ -160,6 +162,13 @@ class GeminiEventHandler(AIAgentEventHandler):
         )
         self.assistant_messages = []
 
+        # Store config for chat session creation
+        self._generate_config = types.GenerateContentConfig(**self.model_setting)
+
+        # Chat session for automatic thought_signature handling (Gemini 3 requirement)
+        # Will be created lazily on first use
+        self._chat_session = None
+
         # Cache output format type for better performance (avoid repeated dict lookups)
         self.output_format_type = (
             self.agent["configuration"]
@@ -205,6 +214,80 @@ class GeminiEventHandler(AIAgentEventHandler):
         self._global_start_time = None
         if self.enable_timeline_log and self.logger.isEnabledFor(logging.INFO):
             self.logger.info("[TIMELINE] Timeline reset for new run")
+
+    def _create_chat_session(
+        self, history: List[types.Content] = None
+    ) -> "genai.ChatSession":
+        """
+        Create a new chat session with optional history.
+
+        Using chat sessions is required for Gemini 3 models to automatically
+        handle thought_signature in function calling flows. The SDK manages
+        the preservation of thought signatures when using chat.send_message().
+
+        Args:
+            history: Optional conversation history to initialize the chat with
+
+        Returns:
+            A new ChatSession instance
+        """
+        # Build config with reasoning/thinking if enabled
+        config_params = dict(self.model_setting)
+
+        # Add thinking configuration if reasoning is enabled
+        reasoning_config = self.agent["configuration"].get("reasoning", {})
+        if isinstance(reasoning_config, dict) and reasoning_config.get("enabled"):
+            include_thoughts = reasoning_config.get("include_thoughts", True)
+            model_name = (self.model or "").lower()
+            thinking_kwargs = {"include_thoughts": include_thoughts}
+
+            # Prefer thinking_level for Gemini 3 models; use thinking_budget otherwise.
+            if "gemini-3" in model_name:
+                thinking_level = reasoning_config.get("thinking_level")
+                if thinking_level:
+                    thinking_kwargs["thinking_level"] = thinking_level
+                elif "thinking_budget" in reasoning_config:
+                    thinking_kwargs["thinking_budget"] = reasoning_config.get(
+                        "thinking_budget", -1
+                    )
+            else:
+                thinking_budget = reasoning_config.get("thinking_budget", -1)
+                thinking_kwargs["thinking_budget"] = thinking_budget
+                if "thinking_level" in reasoning_config:
+                    thinking_kwargs["thinking_level"] = reasoning_config.get(
+                        "thinking_level"
+                    )
+
+            # Sanitize thinking config
+            supported_fields = set(
+                getattr(types.ThinkingConfig, "model_fields", {}).keys()
+                or getattr(types.ThinkingConfig, "__fields__", {}).keys()
+            )
+            if supported_fields:
+                alias_map = {"thinking_budget": "budget_tokens"}
+                sanitized_kwargs = {}
+                for key, value in thinking_kwargs.items():
+                    if value is None:
+                        continue
+                    target_key = key
+                    if key not in supported_fields and key in alias_map:
+                        if alias_map[key] in supported_fields:
+                            target_key = alias_map[key]
+                    if target_key in supported_fields:
+                        sanitized_kwargs[target_key] = value
+
+                if sanitized_kwargs:
+                    config_params["thinking_config"] = types.ThinkingConfig(
+                        **sanitized_kwargs
+                    )
+
+        config = types.GenerateContentConfig(**config_params)
+
+        return self.client.chats.create(
+            model=self.model,
+            history=history or [],
+            config=config,
+        )
 
     def invoke_model(self, **kwargs: Dict[str, Any]) -> Any:
         """
@@ -450,16 +533,22 @@ class GeminiEventHandler(AIAgentEventHandler):
                     f"[TIMELINE] T+{elapsed:.2f}ms: Preparation complete (took {preparation_time:.2f}ms, cleanup: {cleanup_time:.2f}ms)"
                 )
 
-            response = self.invoke_model(
-                **{
-                    "input": _input_messages,
-                    "stream": stream,
-                }
-            )
+            # Create a chat session for this conversation
+            # Chat sessions automatically handle thought_signature for Gemini 3 models
+            # The history is all messages except the last one (which will be sent)
+            history = _input_messages[:-1] if len(_input_messages) > 1 else []
+            last_message = _input_messages[-1] if _input_messages else None
+
+            if not last_message:
+                raise Exception("No input message to send")
+
+            self._chat_session = self._create_chat_session(history=history)
 
             # If streaming is enabled, process chunks
             if stream:
                 queue.put({"name": "run_id", "value": run_id})
+                # Use chat session's send_message_stream for automatic thought_signature handling
+                response = self._chat_session.send_message_stream(last_message.parts)
                 self.handle_stream(
                     response,
                     _input_messages,
@@ -467,6 +556,8 @@ class GeminiEventHandler(AIAgentEventHandler):
                 )
                 return None
 
+            # Use chat session's send_message for automatic thought_signature handling
+            response = self._chat_session.send_message(last_message.parts)
             self.handle_response(response, _input_messages)
             return run_id
         except Exception as e:
@@ -528,8 +619,9 @@ class GeminiEventHandler(AIAgentEventHandler):
     def handle_function_call(
         self,
         tool_call: Any,
-        input_messages: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
+        input_messages: List[types.Content],
+        return_response_part: bool = False,
+    ) -> Any:
         """
         Processes and executes function calls from the model response.
 
@@ -544,10 +636,12 @@ class GeminiEventHandler(AIAgentEventHandler):
         Args:
             tool_call: Function call information from model response
             input_messages: Current conversation history
-            stream_event: Event to signal streaming completion
+            return_response_part: If True, also return the function response part
+                for use with chat sessions (Gemini 3 thought_signature handling)
 
         Returns:
-            Updated input_messages with function results
+            If return_response_part is False: Updated input_messages with function results
+            If return_response_part is True: Tuple of (input_messages, function_response_part)
 
         Raises:
             Exception: If function execution fails
@@ -590,12 +684,12 @@ class GeminiEventHandler(AIAgentEventHandler):
                 )
             function_output = self._execute_function(function_call_data, arguments)
 
-            # Update conversation history
+            # Update conversation history and get function response part
             if self.logger.isEnabledFor(logging.INFO):
                 self.logger.info(
                     f"[handle_function_call][{function_call_data['name']}] Updating conversation history"
                 )
-            self._update_conversation_history(
+            function_response_part = self._update_conversation_history(
                 tool_call, function_output, input_messages
             )
 
@@ -631,6 +725,8 @@ class GeminiEventHandler(AIAgentEventHandler):
                     f"[TIMELINE] T+{elapsed:.2f}ms: Function '{function_call_data['name']}' complete (took {function_call_time:.2f}ms)"
                 )
 
+            if return_response_part:
+                return input_messages, function_response_part
             return input_messages
 
         except Exception as e:
@@ -771,7 +867,7 @@ class GeminiEventHandler(AIAgentEventHandler):
         tool_call: Any,
         function_output: Any,
         input_messages: List[Dict[str, Any]],
-    ) -> None:
+    ) -> types.Part:
         """
         Updates the conversation history with function call results.
 
@@ -779,6 +875,9 @@ class GeminiEventHandler(AIAgentEventHandler):
             tool_call: Original function call data from model
             function_output: Result from function execution
             input_messages: Conversation history to update
+
+        Returns:
+            types.Part: The function response part (for use with chat sessions)
 
         The function:
         1. Creates a function response part with execution results
@@ -802,6 +901,8 @@ class GeminiEventHandler(AIAgentEventHandler):
         input_messages.append(
             types.Content(role="user", parts=[function_response_part])
         )  # Append the function response
+
+        return function_response_part
 
     def _check_retry_limit(self, retry_count: int) -> None:
         """
@@ -889,19 +990,29 @@ class GeminiEventHandler(AIAgentEventHandler):
         if has_function_call:
             for part in candidate.content.parts:
                 if hasattr(part, "function_call") and part.function_call:
-                    input_messages = self.handle_function_call(
-                        part.function_call, input_messages
+                    # Execute function and get response part
+                    input_messages, function_response_part = self.handle_function_call(
+                        part.function_call, input_messages, return_response_part=True
                     )
+
+                    # Use chat session to send function response - this automatically
+                    # handles thought_signature for Gemini 3 models
+                    if self._chat_session:
+                        next_response = self._chat_session.send_message(
+                            [function_response_part]
+                        )
+                    else:
+                        # Fallback to invoke_model if no chat session
+                        next_response = self.invoke_model(
+                            **{"input": input_messages, "stream": False}
+                        )
+                    self.handle_response(next_response, input_messages, retry_count=0)
+                    return
                 elif part.text:
                     input_messages.append(
                         types.Content(role="model", parts=[types.Part(text=part.text)])
                     )
 
-            # Recurse with fresh response (reset retry count)
-            next_response = self.invoke_model(
-                **{"input": input_messages, "stream": False}
-            )
-            self.handle_response(next_response, input_messages, retry_count=0)
             return
 
         # Scenario 2: Empty response - retry
@@ -910,9 +1021,15 @@ class GeminiEventHandler(AIAgentEventHandler):
                 self.logger.warning(
                     f"Received empty response from model, retrying (attempt {retry_count + 1}/5)..."
                 )
-            next_response = self.invoke_model(
-                **{"input": input_messages, "stream": False}
-            )
+            # Use chat session for retry to maintain thought_signature context
+            if self._chat_session:
+                next_response = self._chat_session.send_message(
+                    [types.Part(text="Please continue.")]
+                )
+            else:
+                next_response = self.invoke_model(
+                    **{"input": input_messages, "stream": False}
+                )
             self.handle_response(
                 next_response, input_messages, retry_count=retry_count + 1
             )
@@ -1180,10 +1297,28 @@ class GeminiEventHandler(AIAgentEventHandler):
                             "index": index,
                         }
                     )
-                input_messages = self.handle_function_call(tool_call, input_messages)
-                next_response = self.invoke_model(
-                    **{"input": input_messages, "stream": bool(stream_event)}
+
+                # Execute the function and get the response
+                input_messages, function_response_part = self.handle_function_call(
+                    tool_call, input_messages, return_response_part=True
                 )
+
+                # Use chat session to send function response - this automatically
+                # handles thought_signature for Gemini 3 models
+                if self._chat_session and bool(stream_event):
+                    next_response = self._chat_session.send_message_stream(
+                        [function_response_part]
+                    )
+                elif self._chat_session:
+                    next_response = self._chat_session.send_message(
+                        [function_response_part]
+                    )
+                else:
+                    # Fallback to invoke_model if no chat session (shouldn't happen)
+                    next_response = self.invoke_model(
+                        **{"input": input_messages, "stream": bool(stream_event)}
+                    )
+
                 self.handle_stream(
                     next_response, input_messages, stream_event, retry_count=0
                 )
@@ -1195,9 +1330,20 @@ class GeminiEventHandler(AIAgentEventHandler):
                     self.logger.warning(
                         f"Received empty response from model, retrying (attempt {retry_count + 1}/5)..."
                     )
-                next_response = self.invoke_model(
-                    **{"input": input_messages, "stream": bool(stream_event)}
-                )
+                # Use chat session for retry to maintain thought_signature context
+                if self._chat_session and bool(stream_event):
+                    # For retry, send an empty prompt to get the model to continue
+                    next_response = self._chat_session.send_message_stream(
+                        [types.Part(text="Please continue.")]
+                    )
+                elif self._chat_session:
+                    next_response = self._chat_session.send_message(
+                        [types.Part(text="Please continue.")]
+                    )
+                else:
+                    next_response = self.invoke_model(
+                        **{"input": input_messages, "stream": bool(stream_event)}
+                    )
                 self.handle_stream(
                     next_response, input_messages, stream_event, retry_count + 1
                 )
