@@ -554,11 +554,11 @@ class GeminiEventHandler(AIAgentEventHandler):
                     _input_messages,
                     stream_event=stream_event,
                 )
-                return None
+            else:
+                # Use chat session's send_message for automatic thought_signature handling
+                response = self._chat_session.send_message(last_message.parts)
+                self.handle_response(response, _input_messages)
 
-            # Use chat session's send_message for automatic thought_signature handling
-            response = self._chat_session.send_message(last_message.parts)
-            self.handle_response(response, _input_messages)
             return run_id
         except Exception as e:
             if self.logger.isEnabledFor(logging.ERROR):
