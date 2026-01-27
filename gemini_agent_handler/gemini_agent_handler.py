@@ -121,6 +121,18 @@ class GeminiEventHandler(AIAgentEventHandler):
 
         self.model = self.agent["configuration"].get("model")
 
+        if "enabled_tools" in self.agent["configuration"]:
+            # Add tools if available - matching example.py structure
+            enabled_tools = []
+            if "tools" in self.agent["configuration"]:
+                for tool in self.agent["configuration"]["tools"]:
+                    if tool["name"] not in self.agent["configuration"].get(
+                        "enabled_tools", []
+                    ):
+                        continue
+                    enabled_tools.append(tool)
+            self.agent["configuration"]["tools"] = enabled_tools
+
         tools = []
 
         # Always add function declarations if they exist (excluding google_search and code_execution)
