@@ -99,6 +99,9 @@ class GeminiEventHandler(AIAgentEventHandler):
         """
         AIAgentEventHandler.__init__(self, logger, agent, **setting)
 
+        self.shorten_initial_system_prompt = setting.get(
+            "shorten_initial_system_prompt", True
+        )
         # Enable HTTP/2 for improved performance (multiplexing, header compression, better streaming)
         http_options = types.HttpOptions(
             client_args={"http2": True},  # Enable HTTP/2 for sync operations
@@ -168,7 +171,6 @@ class GeminiEventHandler(AIAgentEventHandler):
                 if k not in ["api_key", "tools", "model", "text", "reasoning"]
             },
             **{
-                "system_instruction": self.agent["instructions"],
                 "tools": tools,
             },
         )
@@ -227,8 +229,30 @@ class GeminiEventHandler(AIAgentEventHandler):
         if self.enable_timeline_log and self.logger.isEnabledFor(logging.INFO):
             self.logger.info("[TIMELINE] Timeline reset for new run")
 
+    def _get_system_instruction(self, message_count: int) -> str:
+        """
+        Return the appropriate system instruction based on conversation length.
+
+        Single message (first/single call) uses a lightweight prompt;
+        continuation calls (2+ messages) use the full agent instructions.
+
+        Args:
+            message_count: Total number of messages in the conversation
+
+        Returns:
+            The system instruction string
+        """
+        if message_count > 1:
+            return self.agent["instructions"]
+        if self.shorten_initial_system_prompt:
+            return (
+                f"You are a helpful {self.agent.get('agent_name', 'assistant')}"
+                f" with the instructions: {self.agent.get('agent_description', '')}."
+            )
+        return self.agent["instructions"]
+
     def _create_chat_session(
-        self, history: List[types.Content] = None
+        self, history: List[types.Content] = None, message_count: int = 1
     ) -> "genai.ChatSession":
         """
         Create a new chat session with optional history.
@@ -239,12 +263,18 @@ class GeminiEventHandler(AIAgentEventHandler):
 
         Args:
             history: Optional conversation history to initialize the chat with
+            message_count: Total number of messages in the conversation
 
         Returns:
             A new ChatSession instance
         """
         # Build config with reasoning/thinking if enabled
         config_params = dict(self.model_setting)
+
+        # Adjust system instruction based on conversation length
+        config_params["system_instruction"] = self._get_system_instruction(
+            message_count
+        )
 
         # Add thinking configuration if reasoning is enabled
         reasoning_config = self.agent["configuration"].get("reasoning", {})
@@ -321,6 +351,10 @@ class GeminiEventHandler(AIAgentEventHandler):
 
             # Build config with reasoning/thinking if enabled
             config_params = dict(self.model_setting)
+
+            # invoke_model is only called during function-call loops (continuations),
+            # so always use full agent instructions.
+            config_params["system_instruction"] = self.agent["instructions"]
 
             # Add thinking configuration if reasoning is enabled
             reasoning_config = self.agent["configuration"].get("reasoning", {})
@@ -554,7 +588,9 @@ class GeminiEventHandler(AIAgentEventHandler):
             if not last_message:
                 raise Exception("No input message to send")
 
-            self._chat_session = self._create_chat_session(history=history)
+            self._chat_session = self._create_chat_session(
+                history=history, message_count=len(_input_messages)
+            )
 
             # If streaming is enabled, process chunks
             if stream:
