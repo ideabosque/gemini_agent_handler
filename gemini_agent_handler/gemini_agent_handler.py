@@ -1158,6 +1158,12 @@ class GeminiEventHandler(AIAgentEventHandler):
         try:
             # Process stream chunks
             for chunk in response_stream:
+                # Stop streaming if the client disconnected mid-generation.
+                if self.is_stream_cancelled():
+                    self.logger.info(
+                        "Stream cancelled (client disconnected); stopping generation."
+                    )
+                    break
                 candidate = chunk.candidates[0]
 
                 # Process each part in the candidate
